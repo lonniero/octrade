@@ -51,6 +51,12 @@ const SMALL_GRID_POSITIONS = [
     [5, 4], [4, 5], [3, 5], [2, 4]  // right
 ];
 
+// CENTER: 4 scene buttons in the very middle of the grid (always visible)
+const SCENE_POSITIONS = [
+    [3, 3], [3, 4],  // top-left, top-right
+    [4, 3], [4, 4]   // bottom-left, bottom-right
+];
+
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 const SCALES = [
@@ -109,7 +115,7 @@ const state = {
     currentScene: 0,
     currentOctave: 5,
     lastPressedStep: 0,
-    mode: 'seq', // 'seq' or 'chords'
+    mode: 'seq', // 'seq', 'chords', or 'harmony'
     smallGridMode: 'length', // 'length', 'velocity', 'octave'
     workspace: 2, // 0: big_grid only, 1: + notes, 2: + small grid
     page: 0, // 0 = tracks 1-8, 1 = tracks 9-16
@@ -127,12 +133,43 @@ const state = {
     copyOrigin: null,
 };
 
+// ── Harmony State ──
+const harmonyState = {
+    key: 0,                // 0=C, 1=C#, ... 11=B
+    scale: 'major',        // major, natural_minor, harmonic_minor, melodic_minor
+    pattern: [],           // 16 chord steps
+    selectedStep: 0,       // currently selected step for editing
+    selectionPhase: 'function', // 'function', 'degree', 'secondary_target'
+    selectedFunction: null,     // temp: function being selected
+    rhodes: null,              // RhodesSynth instance
+    activeChordNotes: [],      // currently sounding chord notes
+    activeChordStep: -1,       // which step is currently sustaining
+};
+
+// Initialize 16 harmony steps
+for (let i = 0; i < 16; i++) {
+    harmonyState.pattern.push({
+        active: false,
+        function: 'tonic',
+        degree: 1,
+        quality: 'maj',
+        extension: 'triad',
+        inversion: 0,
+        voiceCount: 4,
+        length: 4,
+        velocity: 100,
+        secondaryTarget: null,
+        voicedNotes: [],
+    });
+}
+
 let scenes = [createScene(), createScene(), createScene(), createScene()];
 
 // MIDI
 let midiAccess = null;
 let midiOutput = null;
 let midiInput = null;
+let launchpadOutput = null;
 let clockInterval = null;
 
 // ──────────────────────────────────────────────
@@ -141,7 +178,7 @@ let clockInterval = null;
 
 async function initMidi() {
     try {
-        midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+        midiAccess = await navigator.requestMIDIAccess({ sysex: true });
         populateMidiSelects();
         midiAccess.onstatechange = () => populateMidiSelects();
         updateMidiStatus(true);
@@ -197,27 +234,46 @@ function selectMidiInput(id) {
     }
     if (!midiAccess || !id) {
         midiInput = null;
+        launchpadOutput = null;
         return;
     }
     midiInput = midiAccess.inputs.get(id);
     midiInput.onmidimessage = handleMidiInput;
+
+    // Auto-detect matching Launchpad output for LED feedback
+    launchpadOutput = null;
+    const inputName = midiInput.name.toLowerCase();
+    if (inputName.includes('launchpad')) {
+        for (const [outId, output] of midiAccess.outputs) {
+            if (output.name.toLowerCase().includes('launchpad')) {
+                launchpadOutput = output;
+                console.log(`🎹 Launchpad LED output detected: ${output.name}`);
+                // Clear all LEDs first, then sync
+                clearLaunchpadLEDs();
+                setTimeout(() => updateLaunchpadLEDs(), 100);
+                break;
+            }
+        }
+    }
 }
 
 function handleMidiInput(event) {
-    const [status] = event.data;
-    // MIDI Clock: 0xF8
+    const [status, data1, data2] = event.data;
+    const msgType = status & 0xF0;
+
+    // ── MIDI Clock: 0xF8 ──
     if (status === 0xF8 && state.clockSource === 'midi') {
         state.clockTick++;
         playSequencer();
     }
-    // MIDI Start: 0xFA
+    // ── MIDI Start: 0xFA ──
     if (status === 0xFA) {
         state.clockTick = -1;
         state.currentStep = 0;
         state.playing = true;
         updatePlayButton();
     }
-    // MIDI Stop: 0xFC
+    // ── MIDI Stop: 0xFC ──
     if (status === 0xFC) {
         state.playing = false;
         state.clockTick = -1;
@@ -225,6 +281,364 @@ function handleMidiInput(event) {
         allNotesOff();
         updatePlayButton();
     }
+
+    // ── Launchpad MK2 pad press (Note On with velocity > 0) ──
+    // MK2 physical layout: TOP row = notes 81-88, BOTTOM row = notes 11-18
+    // Digital grid: row 0 = top, row 7 = bottom
+    // So we FLIP: gridRow = 8 - Math.floor(note / 10)
+    if (msgType === 0x90 && data2 > 0) {
+        // Right-side buttons (column 9: notes 19, 29, 39, ..., 89) — change track
+        if (data1 % 10 === 9 && data1 >= 19 && data1 <= 89) {
+            const btnRow = 8 - Math.floor(data1 / 10);  // 89→0(top), 19→7(bottom)
+            const trackIndex = btnRow + (state.page * 8);
+            if (trackIndex < scenes[state.currentScene].tracks.length) {
+                console.log(`🎹 LP side button: note=${data1} → track ${trackIndex}`);
+                changeTrack(trackIndex);
+            }
+            return;
+        }
+
+        if (data1 >= 11 && data1 <= 88) {
+            const gridRow = 8 - Math.floor(data1 / 10);   // 8→0(top), 1→7(bottom)
+            const gridCol = (data1 % 10) - 1;              // 1-8 → 0-7
+            if (gridRow >= 0 && gridRow < 8 && gridCol >= 0 && gridCol < 8) {
+                console.log(`🎹 LP pad: note=${data1} → grid[${gridRow},${gridCol}]`);
+                handlePadPress(gridRow, gridCol, { button: 0 });
+                return;
+            }
+        }
+    }
+
+    // ── Control Change from Launchpad (top row buttons send CC 104-111) ──
+    if (msgType === 0xB0 && data2 > 0) {
+        if (data1 >= 104 && data1 <= 111) {
+            const buttonIdx = data1 - 104;
+            console.log(`🎹 LP top button: CC${data1} → button ${buttonIdx}`);
+            switch (buttonIdx) {
+                case 0: // Up arrow — previous track
+                    if (state.currentTrack > 0) {
+                        changeTrack(state.currentTrack - 1);
+                    }
+                    break;
+                case 1: // Down arrow — next track
+                    if (state.currentTrack < scenes[state.currentScene].tracks.length - 1) {
+                        changeTrack(state.currentTrack + 1);
+                    }
+                    break;
+                case 2: // Left arrow — workspace down
+                    if (state.workspace > 0) {
+                        state.workspace--;
+                        renderGrid();
+                    }
+                    break;
+                case 3: // Right arrow — workspace up
+                    if (state.workspace < 2) {
+                        state.workspace++;
+                        renderGrid();
+                    }
+                    break;
+                case 4: // Session — cycle workspace (0→1→2→0)
+                    state.workspace = (state.workspace + 1) % 3;
+                    renderGrid();
+                    break;
+                case 5: // User 1  
+                    break;
+                case 6: // User 2
+                    break;
+                case 7: // Mixer — toggle play
+                    if (state.playing) {
+                        state.playing = false;
+                        stopInternalClock();
+                        allNotesOff();
+                    } else {
+                        state.playing = true;
+                        if (state.clockSource === 'internal') startInternalClock();
+                    }
+                    updatePlayButton();
+                    break;
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════
+// Launchpad MK2 LED Feedback (matching original Octadre)
+// ══════════════════════════════════════════════════════════
+
+// SysEx headers from the original Octadre render.js
+const LP_SYSEX_HEADER = [240, 0, 32, 41, 2, 24, 10]; // Set LED
+const LP_SYSEX_SET_ALL = [240, 0, 32, 41, 2, 24, 14]; // Set all LEDs
+const LP_SYSEX_FLASH = [240, 0, 32, 41, 2, 24, 40, 0]; // Flash LED
+const LP_SYSEX_END = 247;
+
+// Original Octadre track colors (MK2 velocity palette)
+const LP_TRACK_COLORS = [29, 73, 81, 41, 52, 117, 112, 44, 78, 109, 77, 36, 49, 24, 108, 40];
+
+// Original Octadre color constants
+const LP_COLOR = {
+    OFF: 0,
+    CURSOR: 10,
+    ACTIVE_STEP: 3,
+    ACTIVE_NOTE: 58,
+    NON_ACTIVE_NOTE: 40,
+    LENGTH: 8,
+    VELOCITY: 116,
+    OCTAVE: 16,
+    BLINK: 58,
+    TRIPLET: 116,
+    DOUBLE_NOTE: 44,
+    ACTIVE_CHORD: 3,
+    ACTIVE_SCENE: 3,
+    TONIC: 29,
+    SUBDOMINANT: 81,
+    DOMINANT: 41,
+    SECONDARY: 49,
+    WHITE_DIM: 1,
+    WHITE: 3,
+    WARM_WHITE: 72,
+};
+
+// Grid positions as MK2 note values, flipped to match digital grid orientation
+// Formula: LP note = (8 - digitalRow) * 10 + (col + 1)
+// This ensures digital row 0 (top of screen) = MK2 row 8 (top of controller)
+const LP_BIG_GRID = [84, 73, 62, 51, 41, 32, 23, 14, 15, 26, 37, 48, 58, 67, 76, 85];
+const LP_INNER_GRID = [74, 63, 52, 42, 33, 24, 25, 36, 47, 57, 66, 75];
+const LP_SMALL_GRID = [64, 53, 43, 34, 35, 46, 56, 65];
+const LP_MUTE_BUTTONS = [89, 79, 69, 59, 49, 39, 29, 19]; // track 0=top(89), track 7=bottom(19)
+// Center 4 scene buttons: [3,3]=54, [3,4]=55, [4,3]=44, [4,4]=45
+const LP_SCENE_BUTTONS = [54, 55, 44, 45];
+
+function clearLaunchpadLEDs() {
+    if (!launchpadOutput) return;
+    // Send Note On with velocity 0 to every pad (turns off LEDs)
+    for (let lpRow = 1; lpRow <= 8; lpRow++) {
+        for (let lpCol = 1; lpCol <= 9; lpCol++) { // 1-8 grid + 9 side
+            launchpadOutput.send([0x90, lpRow * 10 + lpCol, 0]);
+        }
+    }
+}
+
+// Pre-compute lookup tables (avoid rebuilding every render)
+const _bigSet = new Set(LP_BIG_GRID);
+const _innerSet = new Set(LP_INNER_GRID);
+const _smallSet = new Set(LP_SMALL_GRID);
+const _sceneSet = new Set(LP_SCENE_BUTTONS);
+const _bigLookup = {};
+LP_BIG_GRID.forEach((note, i) => _bigLookup[note] = i);
+const _innerLookup = {};
+LP_INNER_GRID.forEach((note, i) => _innerLookup[note] = i);
+const _smallLookup = {};
+LP_SMALL_GRID.forEach((note, i) => _smallLookup[note] = i);
+const _muteLookup = {};
+LP_MUTE_BUTTONS.forEach((note, i) => _muteLookup[note] = i);
+const _sceneLookup = {};
+LP_SCENE_BUTTONS.forEach((note, i) => _sceneLookup[note] = i);
+
+function updateLaunchpadLEDs() {
+    if (!launchpadOutput) return;
+
+    const track = getCurrentTrack();
+    const trackColor = LP_TRACK_COLORS[state.currentTrack % LP_TRACK_COLORS.length];
+
+    // Use Note On (0x90) for each pad — the MK2 sets LED color from velocity
+    // This is simpler and more reliable than SysEx batches
+    for (let lpRow = 1; lpRow <= 8; lpRow++) {
+        for (let lpCol = 1; lpCol <= 8; lpCol++) {
+            const note = lpRow * 10 + lpCol;
+            let color = LP_COLOR.OFF;
+
+            if (_sceneSet.has(note)) {
+                // Scene buttons — always visible, regardless of workspace
+                const si = _sceneLookup[note];
+                color = (si === state.currentScene) ? LP_COLOR.ACTIVE_SCENE : LP_COLOR.WHITE_DIM;
+            } else if (_bigSet.has(note)) {
+                const i = _bigLookup[note];
+                if (state.mode === 'seq') {
+                    color = getSeqBigPadColor(i, track, trackColor);
+                } else if (state.mode === 'harmony') {
+                    color = getHarmonyBigPadColor(i);
+                } else {
+                    color = trackColor;
+                }
+            } else if (_innerSet.has(note) && (state.workspace > 0 || state.mode === 'harmony')) {
+                const i = _innerLookup[note];
+                if (state.mode === 'seq') {
+                    color = getSeqInnerPadColor(i, track);
+                } else if (state.mode === 'harmony') {
+                    color = getHarmonyInnerPadColor(i);
+                } else {
+                    color = LP_COLOR.NON_ACTIVE_NOTE;
+                }
+            } else if (_smallSet.has(note) && (state.workspace > 1 || state.mode === 'harmony')) {
+                const i = _smallLookup[note];
+                if (state.mode === 'seq') {
+                    color = getSeqSmallPadColor(i, track);
+                } else if (state.mode === 'harmony') {
+                    color = getHarmonySmallPadColor(i);
+                }
+            }
+
+            // Note On ch1: sets LED color via velocity palette
+            launchpadOutput.send([0x90, note, color]);
+        }
+
+        // Side button for this row (column 9)
+        const sideNote = lpRow * 10 + 9;
+        if (_muteLookup[sideNote] !== undefined) {
+            const i = _muteLookup[sideNote];
+            const allTracks = scenes[state.currentScene].tracks;
+            const trackIdx = i + (state.page * 8);
+            let sideColor = LP_COLOR.OFF;
+            if (trackIdx < allTracks.length) {
+                const t = allTracks[trackIdx];
+                const tColor = LP_TRACK_COLORS[trackIdx % LP_TRACK_COLORS.length];
+                if (trackIdx === state.currentTrack) {
+                    sideColor = LP_COLOR.WHITE;
+                } else {
+                    sideColor = t.muted ? LP_COLOR.OFF : tColor;
+                }
+            }
+            launchpadOutput.send([0x90, sideNote, sideColor]);
+        }
+    }
+
+    // Flash the selected step using SysEx (only SysEx supports flash mode)
+    if (state.mode === 'seq' && state.lastPressedStep < LP_BIG_GRID.length) {
+        const step = track.pattern[state.lastPressedStep];
+        let flashColor;
+        if (step.triplet || step.singleTriplet) flashColor = LP_COLOR.TRIPLET;
+        else if (step.doubleNote) flashColor = LP_COLOR.DOUBLE_NOTE;
+        else flashColor = step.active ? LP_COLOR.ACTIVE_STEP : trackColor;
+
+        const flashMsg = LP_SYSEX_FLASH.concat([LP_BIG_GRID[state.lastPressedStep], flashColor, LP_SYSEX_END]);
+        launchpadOutput.send(flashMsg);
+    }
+}
+
+// ── Sequencer LED color helpers (matching original Octadre render.js) ──
+
+function getSeqBigPadColor(stepIndex, track, trackColor) {
+    const step = track.pattern[stepIndex];
+
+    // Out of range steps are off
+    if (stepIndex >= track.trackLength) return LP_COLOR.OFF;
+
+    // Cursor (current playback position) — matches digital version
+    if (state.playing && state.showCursor) {
+        const currentTrackStep = Math.floor(state.currentStep * track.tempoModifier) % track.trackLength;
+        if (stepIndex === currentTrackStep) return LP_COLOR.CURSOR;
+    }
+
+    // Active step types (matching original: triplet > doubleNote > active > track color)
+    if (step.triplet || step.singleTriplet) return LP_COLOR.TRIPLET;
+    if (step.doubleNote) return LP_COLOR.DOUBLE_NOTE;
+    if (step.active) return LP_COLOR.ACTIVE_STEP;
+
+    // Inactive step within range: shows track color
+    return trackColor;
+}
+
+function getSeqInnerPadColor(noteOffset, track) {
+    const noteIndex = (state.currentOctave * 12) + noteOffset;
+    const step = track.pattern[state.lastPressedStep];
+
+    if (noteIndex < 96 && step.notes[noteIndex]) {
+        return LP_COLOR.ACTIVE_NOTE;
+    }
+    return LP_COLOR.NON_ACTIVE_NOTE;
+}
+
+function getSeqSmallPadColor(gridIndex, track) {
+    const step = track.pattern[state.lastPressedStep];
+
+    if (state.smallGridMode === 'length') {
+        return gridIndex < step.length / 2 ? LP_COLOR.LENGTH : LP_COLOR.OFF;
+    } else if (state.smallGridMode === 'velocity') {
+        const mappedValue = (step.velocity * 8) / 127;
+        return gridIndex < mappedValue ? LP_COLOR.VELOCITY : LP_COLOR.OFF;
+    } else if (state.smallGridMode === 'octave') {
+        return gridIndex === state.currentOctave ? LP_COLOR.OCTAVE : LP_COLOR.OFF;
+    }
+    return LP_COLOR.OFF;
+}
+
+// ── Harmony LED color helpers ──
+
+function getHarmonyBigPadColor(stepIndex) {
+    const step = harmonyState.pattern[stepIndex];
+    if (!step.active) {
+        return stepIndex === harmonyState.selectedStep ? LP_COLOR.WHITE_DIM : LP_COLOR.OFF;
+    }
+
+    // Playing cursor
+    if (state.playing && state.showCursor) {
+        if (stepIndex === state.currentStep % 16) return LP_COLOR.CURSOR;
+    }
+
+    const funcColors = {
+        tonic: LP_COLOR.TONIC,
+        predominant: LP_COLOR.SUBDOMINANT,
+        dominant: LP_COLOR.DOMINANT,
+        secondary: LP_COLOR.SECONDARY
+    };
+    const color = funcColors[step.function] || LP_COLOR.NON_ACTIVE_NOTE;
+
+    // Selected step flashes (handled by flash SysEx), show base color
+    if (stepIndex === harmonyState.selectedStep) return LP_COLOR.ACTIVE_NOTE;
+    return color;
+}
+
+function getHarmonyInnerPadColor(innerIdx) {
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+    if (!step) return LP_COLOR.OFF;
+
+    const phase = harmonyState.selectionPhase;
+
+    if (phase === 'function') {
+        // Row 1 (idx 0-3): Function selectors
+        if (innerIdx < 4) {
+            const funcs = ['tonic', 'predominant', 'dominant', 'secondary'];
+            const funcColors = [LP_COLOR.TONIC, LP_COLOR.SUBDOMINANT, LP_COLOR.DOMINANT, LP_COLOR.SECONDARY];
+            if (innerIdx < funcs.length) {
+                return (step.active && step.function === funcs[innerIdx])
+                    ? LP_COLOR.ACTIVE_NOTE : LP_COLOR.NON_ACTIVE_NOTE;
+            }
+        }
+        // Row 2 (idx 4-7): Degree selectors
+        if (innerIdx < 8) {
+            const he = window.harmonyEngine;
+            const degrees = he.getDegreesForFunction(step.function, harmonyState.scale);
+            const degreeIdx = innerIdx - 4;
+            if (degreeIdx < degrees.length) {
+                return (step.active && step.degree === degrees[degreeIdx])
+                    ? LP_COLOR.ACTIVE_NOTE : LP_COLOR.NON_ACTIVE_NOTE;
+            }
+        }
+        // Row 3 (idx 8-11): Extension selectors
+        if (innerIdx < 12) {
+            const extMap = ['triad', '7th', '9th', 'sus'];
+            const extIdx = innerIdx - 8;
+            if (extIdx < extMap.length) {
+                return (step.active && step.extension === extMap[extIdx])
+                    ? LP_COLOR.ACTIVE_NOTE : LP_COLOR.NON_ACTIVE_NOTE;
+            }
+        }
+    }
+    return LP_COLOR.OFF;
+}
+
+function getHarmonySmallPadColor(smallIdx) {
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+    if (!step || !step.active) return LP_COLOR.OFF;
+
+    // SmallIdx 0-1: Voices ±, 2-3: Length ±, 4-5: Inversion ±, 6-7: controls
+    const controlColors = [
+        LP_COLOR.LENGTH, LP_COLOR.LENGTH,       // Vox -, Vox +
+        LP_COLOR.VELOCITY, LP_COLOR.VELOCITY,   // Len -, Len +
+        LP_COLOR.OCTAVE, LP_COLOR.OCTAVE,       // Inv -, Inv +
+        LP_COLOR.NON_ACTIVE_NOTE, LP_COLOR.NON_ACTIVE_NOTE
+    ];
+    return controlColors[smallIdx] || LP_COLOR.OFF;
 }
 
 function updateMidiStatus(available) {
@@ -350,6 +764,8 @@ function playSequencer() {
         queueMidiNotes();
         // Trigger audio samples
         triggerAudioSamples();
+        // Trigger harmony chords
+        triggerHarmonyChords();
         state.currentStep++;
         renderGrid();
     }
@@ -564,6 +980,24 @@ function randomPattern() {
 }
 
 function clearPattern() {
+    if (state.mode === 'harmony') {
+        // Clear all harmony steps
+        harmonyState.pattern.forEach(step => {
+            step.active = false;
+            step.function = 'tonic';
+            step.degree = 1;
+            step.extension = 'triad';
+            step.inversion = 0;
+            step.voiceCount = 4;
+            step.length = 4;
+            step.voicedNotes = [];
+        });
+        if (harmonyState.rhodes) harmonyState.rhodes.allNotesOff();
+        recomputeHarmony();
+        renderGrid();
+        updateHarmonyUI();
+        return;
+    }
     const track = getCurrentTrack();
     track.pattern.forEach(step => {
         step.active = false;
@@ -582,11 +1016,31 @@ function cycleSmallGridMode(direction) {
     updateStepInfo();
 }
 
-function toggleMode() {
-    state.mode = state.mode === 'seq' ? 'chords' : 'seq';
-    document.getElementById('btn-mode-seq').classList.toggle('active', state.mode === 'seq');
-    document.getElementById('btn-mode-chords').classList.toggle('active', state.mode === 'chords');
+function setMode(mode) {
+    state.mode = mode;
+    document.getElementById('btn-mode-seq').classList.toggle('active', mode === 'seq');
+    document.getElementById('btn-mode-chords').classList.toggle('active', mode === 'chords');
+    document.getElementById('btn-mode-harmony').classList.toggle('active', mode === 'harmony');
+
+    // Show/hide harmony controls
+    const harmonyControls = document.getElementById('harmony-controls');
+    if (harmonyControls) {
+        harmonyControls.classList.toggle('hidden', mode !== 'harmony');
+    }
+
+    // Initialize Rhodes on first harmony mode entry
+    if (mode === 'harmony' && !harmonyState.rhodes) {
+        initRhodes();
+    }
+
     renderGrid();
+    if (mode === 'harmony') updateHarmonyUI();
+}
+
+function toggleMode() {
+    const modes = ['seq', 'chords', 'harmony'];
+    const currentIdx = modes.indexOf(state.mode);
+    setMode(modes[(currentIdx + 1) % modes.length]);
 }
 
 function changePage(page) {
@@ -825,6 +1279,17 @@ function handlePadPress(row, col, event) {
     const bigGridIndex = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
     const innerGridIndex = INNER_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
     const smallGridIndex = SMALL_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+    const sceneIndex = SCENE_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+
+    // Scene buttons are always active, regardless of mode or workspace
+    if (sceneIndex !== -1) {
+        if (state.copyMode === 'scene') {
+            executeCopy(sceneIndex);
+        } else {
+            changeScene(sceneIndex);
+        }
+        return;
+    }
 
     if (state.mode === 'seq') {
         if (bigGridIndex !== -1) {
@@ -845,7 +1310,8 @@ function handlePadPress(row, col, event) {
         }
     } else if (state.mode === 'chords') {
         // Chord mode — simplified for web version
-        // TODO: implement full chord grid interaction
+    } else if (state.mode === 'harmony') {
+        handleHarmonyPadPress(row, col, bigGridIndex, innerGridIndex, smallGridIndex);
     }
 }
 
@@ -868,7 +1334,24 @@ function renderGrid() {
             pad.style.boxShadow = '';
             pad.textContent = '';
 
-            if (state.mode === 'seq') {
+            // Check if this is a scene button (always rendered, regardless of mode/workspace)
+            const sceneIdx = SCENE_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+
+            if (sceneIdx !== -1) {
+                // Scene button — always visible
+                pad.textContent = sceneIdx + 1;
+                if (sceneIdx === state.currentScene) {
+                    pad.classList.add('active-step');
+                    pad.style.background = 'var(--accent)';
+                    pad.style.borderColor = 'var(--accent)';
+                    pad.style.boxShadow = '0 0 16px rgba(0, 232, 160, 0.4)';
+                    pad.style.color = 'var(--bg-primary)';
+                } else {
+                    pad.style.background = 'rgba(60, 65, 80, 0.6)';
+                    pad.style.borderColor = 'rgba(120, 130, 150, 0.3)';
+                    pad.style.color = 'var(--text-secondary)';
+                }
+            } else if (state.mode === 'seq') {
                 if (bigIdx !== -1) {
                     renderBigGridPad(pad, bigIdx, track);
                 } else if (innerIdx !== -1 && state.workspace > 0) {
@@ -881,9 +1364,14 @@ function renderGrid() {
                 }
             } else if (state.mode === 'chords') {
                 renderChordPad(pad, row, col);
+            } else if (state.mode === 'harmony') {
+                renderHarmonyPad(pad, row, col, bigIdx, innerIdx, smallIdx);
             }
         }
     }
+
+    // Sync LEDs to physical Launchpad controller
+    updateLaunchpadLEDs();
 }
 
 function renderBigGridPad(pad, stepIndex, track) {
@@ -1353,6 +1841,510 @@ function toggleSampleBrowser() {
 }
 
 // ──────────────────────────────────────────────
+// HARMONY MODE
+// ──────────────────────────────────────────────
+
+function initRhodes() {
+    if (harmonyState.rhodes) return;
+    // Ensure audio context exists
+    if (window.audioEngine && window.audioEngine.audioContext) {
+        harmonyState.rhodes = new RhodesSynth(window.audioEngine.audioContext);
+        harmonyState.rhodes.init();
+        console.log('[Harmony] Rhodes synth initialized');
+    } else {
+        // Defer until audio engine is ready
+        console.log('[Harmony] Waiting for audio context...');
+    }
+}
+
+function ensureRhodes() {
+    if (!harmonyState.rhodes && window.audioEngine) {
+        if (!window.audioEngine.audioContext) {
+            window.audioEngine.init();
+        }
+        harmonyState.rhodes = new RhodesSynth(window.audioEngine.audioContext);
+        harmonyState.rhodes.init();
+    }
+}
+
+// ── Harmony Grid Rendering ──
+
+function renderHarmonyPad(pad, row, col, bigIdx, innerIdx, smallIdx) {
+    if (bigIdx !== -1) {
+        renderHarmonyBigPad(pad, bigIdx);
+    } else if (innerIdx !== -1) {
+        renderHarmonyInnerPad(pad, innerIdx);
+    } else if (smallIdx !== -1) {
+        renderHarmonySmallPad(pad, smallIdx);
+    } else {
+        pad.classList.add('inactive');
+        pad.style.background = 'rgba(15, 15, 25, 0.6)';
+    }
+}
+
+function renderHarmonyBigPad(pad, stepIndex) {
+    const step = harmonyState.pattern[stepIndex];
+    const he = window.harmonyEngine;
+
+    pad.classList.add('harmony-step');
+
+    if (step.active) {
+        // Color by harmonic function
+        pad.classList.add(`harmony-${step.function}`);
+        pad.classList.add('step-active');
+
+        // Show roman numeral
+        const roman = he.getRomanNumeral(step, harmonyState.scale);
+        pad.textContent = roman;
+    } else {
+        pad.style.background = 'rgba(25, 25, 40, 0.5)';
+        pad.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+        pad.textContent = '';
+    }
+
+    // Cursor (playback position)
+    if (state.playing) {
+        const playStep = state.currentStep % 16;
+        if (stepIndex === playStep) {
+            pad.classList.add('harmony-cursor');
+        }
+    }
+
+    // Selected step for editing
+    if (stepIndex === harmonyState.selectedStep) {
+        pad.classList.add('harmony-selected');
+    }
+}
+
+function renderHarmonyInnerPad(pad, innerIdx) {
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+    const he = window.harmonyEngine;
+    const phase = harmonyState.selectionPhase;
+
+    if (phase === 'function') {
+        // Row 1 (indices 0–3): Function selectors
+        const funcMap = ['tonic', 'predominant', 'dominant', 'secondary'];
+        const funcLabels = ['T', 'PD', 'D', 'Sec'];
+
+        if (innerIdx < 4) {
+            const func = funcMap[innerIdx];
+            pad.classList.add('harmony-func', `func-${func}`);
+            pad.textContent = funcLabels[innerIdx];
+            if (step.active && step.function === func) {
+                pad.classList.add('active');
+            }
+        } else if (innerIdx < 8) {
+            // Row 2: Show degrees for current function
+            const degrees = he.getDegreesForFunction(step.function, harmonyState.scale);
+            const degreeIdx = innerIdx - 4;
+            if (degreeIdx < degrees.length) {
+                const deg = degrees[degreeIdx];
+                const roman = he.getRomanForDegree(deg, harmonyState.scale);
+                pad.classList.add('harmony-degree', `func-${step.function}`);
+                pad.textContent = roman;
+                if (step.active && step.degree === deg) {
+                    pad.classList.add('active');
+                }
+            } else {
+                pad.classList.add('inactive');
+                pad.style.background = 'rgba(15, 15, 25, 0.4)';
+            }
+        } else {
+            // Row 3: Extensions
+            const extMap = ['triad', '7th', '9th', 'sus4'];
+            const extLabels = ['Triad', '7th', '9th', 'Sus4'];
+            const extIdx = innerIdx - 8;
+            if (extIdx < 4) {
+                pad.classList.add('harmony-ext');
+                pad.textContent = extLabels[extIdx];
+                if (step.active && step.extension === extMap[extIdx]) {
+                    pad.classList.add('active');
+                }
+            }
+        }
+    } else if (phase === 'secondary_target') {
+        // Show secondary target selector: V/ii, V/iii, V/IV, V/V, V/vi
+        const targets = he.getSecondaryTargets(harmonyState.scale);
+        if (innerIdx < targets.length) {
+            const targetDeg = targets[innerIdx];
+            const roman = he.getRomanForDegree(targetDeg, harmonyState.scale);
+            pad.classList.add('harmony-degree', 'func-secondary');
+            pad.textContent = `V/${roman}`;
+            if (step.secondaryTarget === targetDeg) {
+                pad.classList.add('active');
+            }
+        } else if (innerIdx === targets.length) {
+            // Back button
+            pad.classList.add('harmony-ctrl');
+            pad.textContent = '← Back';
+        } else {
+            pad.classList.add('inactive');
+            pad.style.background = 'rgba(15, 15, 25, 0.4)';
+        }
+    }
+}
+
+function renderHarmonySmallPad(pad, smallIdx) {
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+    // 8 pads: mapped to voice/length controls
+    const labels = ['Key↓', 'Key↑', 'Vox-', 'Vox+', 'Len-', 'Len+', 'Inv-', 'Inv+'];
+    pad.classList.add('harmony-ctrl');
+    pad.textContent = labels[smallIdx] || '';
+}
+
+// ── Harmony Pad Interaction ──
+
+function handleHarmonyPadPress(row, col, bigIdx, innerIdx, smallIdx) {
+    const he = window.harmonyEngine;
+
+    if (bigIdx !== -1) {
+        const step = harmonyState.pattern[bigIdx];
+
+        // If tapping the already-selected active step → clear it
+        if (bigIdx === harmonyState.selectedStep && step.active) {
+            step.active = false;
+            step.function = 'tonic';
+            step.degree = 1;
+            step.extension = 'triad';
+            step.inversion = 0;
+            step.voiceCount = 4;
+            step.length = 4;
+            step.voicedNotes = [];
+            // Release any playing notes
+            if (harmonyState.rhodes) harmonyState.rhodes.allNotesOff();
+            recomputeHarmony();
+            renderGrid();
+            updateHarmonyUI();
+            return;
+        }
+
+        // Select this step for editing
+        harmonyState.selectedStep = bigIdx;
+
+        if (!step.active) {
+            // Activate the step with defaults
+            step.active = true;
+            step.function = 'tonic';
+            step.degree = 1;
+            step.extension = 'triad';
+            step.inversion = 0;
+            step.voiceCount = 4;
+            step.length = 4;
+        }
+
+        harmonyState.selectionPhase = 'function';
+        recomputeHarmony();
+        renderGrid();
+        updateHarmonyUI();
+
+        // Preview the chord
+        previewHarmonyStep(bigIdx);
+
+    } else if (innerIdx !== -1) {
+        handleHarmonyInnerPress(innerIdx);
+
+    } else if (smallIdx !== -1) {
+        handleHarmonySmallPress(smallIdx);
+    }
+}
+
+function handleHarmonyInnerPress(innerIdx) {
+    const he = window.harmonyEngine;
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+    if (!step.active) return;
+
+    if (harmonyState.selectionPhase === 'function') {
+        if (innerIdx < 4) {
+            // Function selection
+            const funcMap = ['tonic', 'predominant', 'dominant', 'secondary'];
+            step.function = funcMap[innerIdx];
+
+            if (step.function === 'secondary') {
+                harmonyState.selectionPhase = 'secondary_target';
+            } else {
+                // Auto-set to first degree of the function
+                const degrees = he.getDegreesForFunction(step.function, harmonyState.scale);
+                step.degree = degrees[0];
+            }
+        } else if (innerIdx < 8) {
+            // Degree selection
+            const degrees = he.getDegreesForFunction(step.function, harmonyState.scale);
+            const degreeIdx = innerIdx - 4;
+            if (degreeIdx < degrees.length) {
+                step.degree = degrees[degreeIdx];
+            }
+        } else {
+            // Extension selection
+            const extMap = ['triad', '7th', '9th', 'sus4'];
+            const extIdx = innerIdx - 8;
+            if (extIdx < extMap.length) {
+                step.extension = extMap[extIdx];
+            }
+        }
+    } else if (harmonyState.selectionPhase === 'secondary_target') {
+        const targets = he.getSecondaryTargets(harmonyState.scale);
+        if (innerIdx < targets.length) {
+            step.secondaryTarget = targets[innerIdx];
+            step.function = 'secondary';
+            harmonyState.selectionPhase = 'function';
+        } else if (innerIdx === targets.length) {
+            // Back button
+            harmonyState.selectionPhase = 'function';
+            step.function = 'tonic';
+        }
+    }
+
+    recomputeHarmony();
+    renderGrid();
+    updateHarmonyUI();
+
+    // Preview
+    previewHarmonyStep(harmonyState.selectedStep);
+}
+
+function handleHarmonySmallPress(smallIdx) {
+    const he = window.harmonyEngine;
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+
+    switch (smallIdx) {
+        case 0: // Key down
+            harmonyState.key = (harmonyState.key + 11) % 12;
+            break;
+        case 1: // Key up
+            harmonyState.key = (harmonyState.key + 1) % 12;
+            break;
+        case 2: // Voices down
+            if (step.active) step.voiceCount = Math.max(3, step.voiceCount - 1);
+            break;
+        case 3: // Voices up
+            if (step.active) step.voiceCount = Math.min(6, step.voiceCount + 1);
+            break;
+        case 4: // Length down
+            if (step.active) step.length = Math.max(1, step.length - 1);
+            break;
+        case 5: // Length up
+            if (step.active) step.length = Math.min(16, step.length + 1);
+            break;
+        case 6: // Inversion down
+            if (step.active) step.inversion = Math.max(0, step.inversion - 1);
+            break;
+        case 7: // Inversion up
+            if (step.active) {
+                const maxInv = step.extension === 'triad' ? 2 : 3;
+                step.inversion = Math.min(maxInv, step.inversion + 1);
+            }
+            break;
+    }
+
+    recomputeHarmony();
+    renderGrid();
+    updateHarmonyUI();
+
+    // Preview on key change
+    if (smallIdx <= 1 && step.active) {
+        previewHarmonyStep(harmonyState.selectedStep);
+    }
+}
+
+// ── Harmony Engine Integration ──
+
+function recomputeHarmony() {
+    if (!window.harmonyEngine) return;
+    window.harmonyEngine.computeProgression(
+        harmonyState.pattern,
+        harmonyState.key,
+        harmonyState.scale
+    );
+}
+
+function previewHarmonyStep(stepIndex) {
+    ensureRhodes();
+    if (!harmonyState.rhodes) return;
+
+    const step = harmonyState.pattern[stepIndex];
+    if (!step.active || step.voicedNotes.length === 0) return;
+
+    // Release previous preview
+    harmonyState.rhodes.allNotesOff();
+
+    // Play the chord for 1.5 seconds
+    harmonyState.rhodes.playChord(step.voicedNotes, step.velocity, 1.5);
+}
+
+// ── Harmony Playback ──
+
+function triggerHarmonyChords() {
+    if (!harmonyState.rhodes && window.RhodesSynth) {
+        ensureRhodes();
+    }
+    if (!harmonyState.rhodes) return;
+
+    const playStep = state.currentStep % 16;
+
+    // Check if a chord starts at this step
+    const step = harmonyState.pattern[playStep];
+    if (step && step.active && step.voicedNotes.length > 0) {
+        // Release any active chord
+        if (harmonyState.activeChordNotes.length > 0) {
+            harmonyState.rhodes.releaseChord(harmonyState.activeChordNotes);
+        }
+
+        // Play the new chord
+        harmonyState.rhodes.playChord(step.voicedNotes, step.velocity);
+        harmonyState.activeChordNotes = [...step.voicedNotes];
+        harmonyState.activeChordStep = playStep;
+    }
+
+    // Check if the active chord should be released (based on length)
+    if (harmonyState.activeChordStep >= 0) {
+        const activeStep = harmonyState.pattern[harmonyState.activeChordStep];
+        if (activeStep) {
+            const elapsed = (playStep - harmonyState.activeChordStep + 16) % 16;
+            if (elapsed >= activeStep.length && playStep !== harmonyState.activeChordStep) {
+                // Check if there's no new chord at this step
+                const currentStep = harmonyState.pattern[playStep];
+                if (!currentStep || !currentStep.active) {
+                    harmonyState.rhodes.releaseChord(harmonyState.activeChordNotes);
+                    harmonyState.activeChordNotes = [];
+                    harmonyState.activeChordStep = -1;
+                }
+            }
+        }
+    }
+}
+
+// ── Harmony UI Updates ──
+
+function updateHarmonyUI() {
+    const he = window.harmonyEngine;
+    if (!he) return;
+
+    const step = harmonyState.pattern[harmonyState.selectedStep];
+
+    // Key label
+    const keyLabel = document.getElementById('harmony-key-label');
+    if (keyLabel) keyLabel.textContent = he.getKeyName(harmonyState.key, harmonyState.scale);
+
+    // Scale toggle button
+    const scaleBtn = document.getElementById('harmony-scale-toggle');
+    if (scaleBtn) {
+        const scaleLabels = {
+            major: 'Major', natural_minor: 'Minor',
+            harmonic_minor: 'Harm Min', melodic_minor: 'Mel Min'
+        };
+        scaleBtn.textContent = scaleLabels[harmonyState.scale] || 'Major';
+    }
+
+    // Voices label
+    const voicesLabel = document.getElementById('harmony-voices-label');
+    if (voicesLabel) voicesLabel.textContent = step.active ? step.voiceCount : '-';
+
+    // Length label
+    const lengthLabel = document.getElementById('harmony-length-label');
+    if (lengthLabel) lengthLabel.textContent = step.active ? step.length : '-';
+
+    // Step info
+    const stepLabel = document.getElementById('harmony-step-label');
+    const notesLabel = document.getElementById('harmony-notes-label');
+    if (stepLabel) {
+        if (step.active) {
+            stepLabel.textContent = he.getRomanNumeral(step, harmonyState.scale);
+            // Color the roman numeral
+            const funcColors = {
+                tonic: 'var(--harmony-tonic)',
+                predominant: 'var(--harmony-predominant)',
+                dominant: 'var(--harmony-dominant)',
+                secondary: 'var(--harmony-secondary)',
+            };
+            stepLabel.style.color = funcColors[step.function] || 'var(--text-primary)';
+        } else {
+            stepLabel.textContent = '—';
+            stepLabel.style.color = '';
+        }
+    }
+    if (notesLabel) {
+        if (step.active && step.voicedNotes.length > 0) {
+            notesLabel.textContent = step.voicedNotes.map(n => he.midiToName(n)).join(' ');
+        } else {
+            notesLabel.textContent = '';
+        }
+    }
+}
+
+function setupHarmonyListeners() {
+    // Key controls
+    const keyDown = document.getElementById('harmony-key-down');
+    const keyUp = document.getElementById('harmony-key-up');
+    if (keyDown) keyDown.addEventListener('click', () => {
+        harmonyState.key = (harmonyState.key + 11) % 12;
+        recomputeHarmony();
+        renderGrid();
+        updateHarmonyUI();
+    });
+    if (keyUp) keyUp.addEventListener('click', () => {
+        harmonyState.key = (harmonyState.key + 1) % 12;
+        recomputeHarmony();
+        renderGrid();
+        updateHarmonyUI();
+    });
+
+    // Scale toggle
+    const scaleToggle = document.getElementById('harmony-scale-toggle');
+    if (scaleToggle) scaleToggle.addEventListener('click', () => {
+        const scales = ['major', 'natural_minor', 'harmonic_minor', 'melodic_minor'];
+        const idx = scales.indexOf(harmonyState.scale);
+        harmonyState.scale = scales[(idx + 1) % scales.length];
+        recomputeHarmony();
+        renderGrid();
+        updateHarmonyUI();
+    });
+
+    // Voices
+    const voicesDown = document.getElementById('harmony-voices-down');
+    const voicesUp = document.getElementById('harmony-voices-up');
+    if (voicesDown) voicesDown.addEventListener('click', () => {
+        const step = harmonyState.pattern[harmonyState.selectedStep];
+        if (step.active) {
+            step.voiceCount = Math.max(3, step.voiceCount - 1);
+            recomputeHarmony();
+            renderGrid();
+            updateHarmonyUI();
+        }
+    });
+    if (voicesUp) voicesUp.addEventListener('click', () => {
+        const step = harmonyState.pattern[harmonyState.selectedStep];
+        if (step.active) {
+            step.voiceCount = Math.min(6, step.voiceCount + 1);
+            recomputeHarmony();
+            renderGrid();
+            updateHarmonyUI();
+        }
+    });
+
+    // Length
+    const lengthDown = document.getElementById('harmony-length-down');
+    const lengthUp = document.getElementById('harmony-length-up');
+    if (lengthDown) lengthDown.addEventListener('click', () => {
+        const step = harmonyState.pattern[harmonyState.selectedStep];
+        if (step.active) {
+            step.length = Math.max(1, step.length - 1);
+            recomputeHarmony();
+            renderGrid();
+            updateHarmonyUI();
+        }
+    });
+    if (lengthUp) lengthUp.addEventListener('click', () => {
+        const step = harmonyState.pattern[harmonyState.selectedStep];
+        if (step.active) {
+            step.length = Math.min(16, step.length + 1);
+            recomputeHarmony();
+            renderGrid();
+            updateHarmonyUI();
+        }
+    });
+}
+
+// ──────────────────────────────────────────────
 // EVENT BINDINGS
 // ──────────────────────────────────────────────
 
@@ -1396,12 +2388,12 @@ function setupEventListeners() {
     document.getElementById('ctrl-page1').addEventListener('click', () => changePage(1));
 
     // Mode buttons
-    document.getElementById('btn-mode-seq').addEventListener('click', () => {
-        if (state.mode !== 'seq') toggleMode();
-    });
-    document.getElementById('btn-mode-chords').addEventListener('click', () => {
-        if (state.mode !== 'chords') toggleMode();
-    });
+    document.getElementById('btn-mode-seq').addEventListener('click', () => setMode('seq'));
+    document.getElementById('btn-mode-chords').addEventListener('click', () => setMode('chords'));
+    document.getElementById('btn-mode-harmony').addEventListener('click', () => setMode('harmony'));
+
+    // Harmony controls
+    setupHarmonyListeners();
 
     // Scene buttons
     document.querySelectorAll('.scene-btn').forEach(btn => {

@@ -50,6 +50,12 @@
     --accent-dim: #00a070;
     --danger: #ff4060;
 
+    /* Harmony Function Colors */
+    --harmony-tonic: #00e8a0;
+    --harmony-predominant: #e8b800;
+    --harmony-dominant: #e85050;
+    --harmony-secondary: #b060e8;
+
     /* Borders */
     --border-subtle: rgba(255, 255, 255, 0.06);
     --border-medium: rgba(255, 255, 255, 0.1);
@@ -1687,4 +1693,314 @@ button:focus:not(:focus-visible) {
     border-radius: 50%;
     background: var(--accent);
     box-shadow: 0 0 4px var(--accent);
+}
+
+/* ============================================
+   HARMONY MODE
+   ============================================ */
+
+.harmony-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 16px;
+    background: rgba(20, 20, 35, 0.8);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    backdrop-filter: blur(10px);
+    margin-top: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.harmony-controls.hidden {
+    display: none;
+}
+
+.harmony-key-display,
+.harmony-scale-display,
+.harmony-voice-display,
+.harmony-length-display {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.harmony-key-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--harmony-tonic);
+    min-width: 80px;
+    text-align: center;
+}
+
+.harmony-ctrl-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.harmony-ctrl-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+}
+
+.harmony-scale-btn {
+    width: auto;
+    padding: 0 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.harmony-info-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+}
+
+.harmony-info-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 20px;
+    text-align: center;
+}
+
+.harmony-step-info {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 60px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-subtle);
+}
+
+.harmony-step-roman {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.harmony-step-notes {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-muted);
+}
+
+/* Harmony Grid Pads */
+.pad.harmony-step {
+    position: relative;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.55rem;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.9);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pad.harmony-tonic {
+    background: rgba(0, 232, 160, 0.2) !important;
+    border-color: rgba(0, 232, 160, 0.4) !important;
+}
+
+.pad.harmony-tonic.step-active {
+    background: rgba(0, 232, 160, 0.5) !important;
+    box-shadow: 0 0 12px rgba(0, 232, 160, 0.3), inset 0 0 8px rgba(0, 232, 160, 0.15) !important;
+}
+
+.pad.harmony-predominant {
+    background: rgba(232, 184, 0, 0.2) !important;
+    border-color: rgba(232, 184, 0, 0.4) !important;
+}
+
+.pad.harmony-predominant.step-active {
+    background: rgba(232, 184, 0, 0.5) !important;
+    box-shadow: 0 0 12px rgba(232, 184, 0, 0.3), inset 0 0 8px rgba(232, 184, 0, 0.15) !important;
+}
+
+.pad.harmony-dominant {
+    background: rgba(232, 80, 80, 0.2) !important;
+    border-color: rgba(232, 80, 80, 0.4) !important;
+}
+
+.pad.harmony-dominant.step-active {
+    background: rgba(232, 80, 80, 0.5) !important;
+    box-shadow: 0 0 12px rgba(232, 80, 80, 0.3), inset 0 0 8px rgba(232, 80, 80, 0.15) !important;
+}
+
+.pad.harmony-secondary {
+    background: rgba(176, 96, 232, 0.2) !important;
+    border-color: rgba(176, 96, 232, 0.4) !important;
+}
+
+.pad.harmony-secondary.step-active {
+    background: rgba(176, 96, 232, 0.5) !important;
+    box-shadow: 0 0 12px rgba(176, 96, 232, 0.3), inset 0 0 8px rgba(176, 96, 232, 0.15) !important;
+}
+
+.pad.harmony-cursor {
+    outline: 2px solid rgba(255, 255, 255, 0.8) !important;
+    outline-offset: -2px;
+}
+
+.pad.harmony-selected {
+    outline: 2px solid var(--accent) !important;
+    outline-offset: -2px;
+}
+
+/* Harmony inner grid: function selector */
+.pad.harmony-func {
+    font-size: 0.6rem;
+    font-weight: 700;
+    font-family: 'Inter', sans-serif;
+    letter-spacing: 0.3px;
+}
+
+.pad.harmony-func.func-tonic {
+    background: rgba(0, 232, 160, 0.15) !important;
+    border-color: rgba(0, 232, 160, 0.3) !important;
+    color: var(--harmony-tonic);
+}
+
+.pad.harmony-func.func-tonic.active {
+    background: rgba(0, 232, 160, 0.45) !important;
+    box-shadow: 0 0 10px rgba(0, 232, 160, 0.3) !important;
+}
+
+.pad.harmony-func.func-predominant {
+    background: rgba(232, 184, 0, 0.15) !important;
+    border-color: rgba(232, 184, 0, 0.3) !important;
+    color: var(--harmony-predominant);
+}
+
+.pad.harmony-func.func-predominant.active {
+    background: rgba(232, 184, 0, 0.45) !important;
+    box-shadow: 0 0 10px rgba(232, 184, 0, 0.3) !important;
+}
+
+.pad.harmony-func.func-dominant {
+    background: rgba(232, 80, 80, 0.15) !important;
+    border-color: rgba(232, 80, 80, 0.3) !important;
+    color: var(--harmony-dominant);
+}
+
+.pad.harmony-func.func-dominant.active {
+    background: rgba(232, 80, 80, 0.45) !important;
+    box-shadow: 0 0 10px rgba(232, 80, 80, 0.3) !important;
+}
+
+.pad.harmony-func.func-secondary {
+    background: rgba(176, 96, 232, 0.15) !important;
+    border-color: rgba(176, 96, 232, 0.3) !important;
+    color: var(--harmony-secondary);
+}
+
+.pad.harmony-func.func-secondary.active {
+    background: rgba(176, 96, 232, 0.45) !important;
+    box-shadow: 0 0 10px rgba(176, 96, 232, 0.3) !important;
+}
+
+.pad.harmony-degree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    transition: all 0.15s ease;
+}
+
+/* Degree pads inherit function colors */
+.pad.harmony-degree.func-tonic {
+    background: rgba(0, 232, 160, 0.12) !important;
+    border-color: rgba(0, 232, 160, 0.25) !important;
+    color: var(--harmony-tonic);
+}
+
+.pad.harmony-degree.func-tonic.active {
+    background: rgba(0, 232, 160, 0.5) !important;
+    border-color: rgba(0, 232, 160, 0.6) !important;
+    box-shadow: 0 0 12px rgba(0, 232, 160, 0.35), inset 0 0 6px rgba(0, 232, 160, 0.15) !important;
+    color: #fff;
+}
+
+.pad.harmony-degree.func-predominant {
+    background: rgba(232, 184, 0, 0.12) !important;
+    border-color: rgba(232, 184, 0, 0.25) !important;
+    color: var(--harmony-predominant);
+}
+
+.pad.harmony-degree.func-predominant.active {
+    background: rgba(232, 184, 0, 0.5) !important;
+    border-color: rgba(232, 184, 0, 0.6) !important;
+    box-shadow: 0 0 12px rgba(232, 184, 0, 0.35), inset 0 0 6px rgba(232, 184, 0, 0.15) !important;
+    color: #fff;
+}
+
+.pad.harmony-degree.func-dominant {
+    background: rgba(232, 80, 80, 0.12) !important;
+    border-color: rgba(232, 80, 80, 0.25) !important;
+    color: var(--harmony-dominant);
+}
+
+.pad.harmony-degree.func-dominant.active {
+    background: rgba(232, 80, 80, 0.5) !important;
+    border-color: rgba(232, 80, 80, 0.6) !important;
+    box-shadow: 0 0 12px rgba(232, 80, 80, 0.35), inset 0 0 6px rgba(232, 80, 80, 0.15) !important;
+    color: #fff;
+}
+
+.pad.harmony-degree.func-secondary {
+    background: rgba(176, 96, 232, 0.12) !important;
+    border-color: rgba(176, 96, 232, 0.25) !important;
+    color: var(--harmony-secondary);
+}
+
+.pad.harmony-degree.func-secondary.active {
+    background: rgba(176, 96, 232, 0.5) !important;
+    border-color: rgba(176, 96, 232, 0.6) !important;
+    box-shadow: 0 0 12px rgba(176, 96, 232, 0.35), inset 0 0 6px rgba(176, 96, 232, 0.15) !important;
+    color: #fff;
+}
+
+.pad.harmony-ext {
+    font-size: 0.5rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.pad.harmony-ext.active {
+    background: rgba(0, 232, 160, 0.35) !important;
+    color: var(--text-primary);
+}
+
+.pad.harmony-ctrl {
+    font-size: 0.6rem;
+    font-weight: 500;
+    font-family: 'Inter', sans-serif;
+    color: var(--text-secondary);
+    background: rgba(30, 30, 50, 0.6) !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.pad.harmony-ctrl:hover {
+    background: rgba(50, 50, 80, 0.6) !important;
+    color: var(--text-primary);
 }

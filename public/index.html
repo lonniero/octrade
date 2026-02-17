@@ -113,6 +113,36 @@
                 <div id="mode-bar">
                     <button id="btn-mode-seq" class="mode-btn active">Sequencer</button>
                     <button id="btn-mode-chords" class="mode-btn">Chords</button>
+                    <button id="btn-mode-harmony" class="mode-btn">Harmony</button>
+                </div>
+
+                <!-- Harmony Controls (visible in harmony mode) -->
+                <div id="harmony-controls" class="harmony-controls hidden">
+                    <div class="harmony-key-display">
+                        <button id="harmony-key-down" class="harmony-ctrl-btn" title="Key Down">◀</button>
+                        <span id="harmony-key-label" class="harmony-key-label">C Major</span>
+                        <button id="harmony-key-up" class="harmony-ctrl-btn" title="Key Up">▶</button>
+                    </div>
+                    <div class="harmony-scale-display">
+                        <button id="harmony-scale-toggle" class="harmony-ctrl-btn harmony-scale-btn"
+                            title="Toggle Scale">Major</button>
+                    </div>
+                    <div class="harmony-voice-display">
+                        <span class="harmony-info-label">Voices</span>
+                        <button id="harmony-voices-down" class="harmony-ctrl-btn">−</button>
+                        <span id="harmony-voices-label" class="harmony-info-value">4</span>
+                        <button id="harmony-voices-up" class="harmony-ctrl-btn">+</button>
+                    </div>
+                    <div class="harmony-length-display">
+                        <span class="harmony-info-label">Length</span>
+                        <button id="harmony-length-down" class="harmony-ctrl-btn">−</button>
+                        <span id="harmony-length-label" class="harmony-info-value">4</span>
+                        <button id="harmony-length-up" class="harmony-ctrl-btn">+</button>
+                    </div>
+                    <div class="harmony-step-info">
+                        <span id="harmony-step-label" class="harmony-step-roman">—</span>
+                        <span id="harmony-notes-label" class="harmony-step-notes"></span>
+                    </div>
                 </div>
 
                 <!-- The Launchpad Grid -->
@@ -310,6 +340,8 @@
     </div>
 
     <script src="audio-engine.js" defer></script>
+    <script src="harmony-engine.js" defer></script>
+    <script src="rhodes-synth.js" defer></script>
     <script src="app.js" defer></script>
 </body>
 
