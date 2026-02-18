@@ -9,7 +9,7 @@ class OctadreAudioEngine {
         this.masterGain = null;
         this.compressor = null;
 
-        // Per-track sample data: { buffer, name, file, gain, pitch, startOffset, endOffset }
+        // Per-track sample data: { buffer, name, file, gain, pitch, startOffset, endOffset, adsr }
         this.trackSamples = new Array(16).fill(null).map(() => ({
             buffer: null,
             name: null,
@@ -18,7 +18,8 @@ class OctadreAudioEngine {
             pitch: 1.0,       // playback rate (1.0 = original pitch)
             startOffset: 0,   // normalized 0-1
             endOffset: 1,     // normalized 0-1
-            waveformData: null // downsampled waveform for visualization
+            waveformData: null, // downsampled waveform for visualization
+            adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }  // seconds / level
         }));
 
         // File System Access
@@ -285,7 +286,8 @@ class OctadreAudioEngine {
                 pitch: this.trackSamples[trackIndex]?.pitch ?? 1.0,
                 startOffset: 0,
                 endOffset: 1,
-                waveformData: this.generateWaveformData(audioBuffer)
+                waveformData: this.generateWaveformData(audioBuffer),
+                adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
             };
 
             console.log(`[AudioEngine] Loaded "${fileHandle.name}" → Track ${trackIndex + 1} (${audioBuffer.duration.toFixed(2)}s)`);
@@ -311,7 +313,8 @@ class OctadreAudioEngine {
                 pitch: this.trackSamples[trackIndex]?.pitch ?? 1.0,
                 startOffset: 0,
                 endOffset: 1,
-                waveformData: this.generateWaveformData(audioBuffer)
+                waveformData: this.generateWaveformData(audioBuffer),
+                adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
             };
 
             console.log(`[AudioEngine] Loaded "${file.name}" → Track ${trackIndex + 1}`);
@@ -331,7 +334,8 @@ class OctadreAudioEngine {
             pitch: 1.0,
             startOffset: 0,
             endOffset: 1,
-            waveformData: null
+            waveformData: null,
+            adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
         };
     }
 
@@ -447,10 +451,17 @@ class OctadreAudioEngine {
         source.buffer = sample.buffer;
         source.playbackRate.value = sample.pitch;
 
-        // Per-track gain
+        // Per-track gain with ADSR envelope
         const trackGain = this.audioContext.createGain();
         const velocityScale = velocity / 127;
-        trackGain.gain.value = sample.gain * velocityScale;
+        const peakGain = sample.gain * velocityScale;
+        const adsr = sample.adsr;
+        const now = this.audioContext.currentTime;
+
+        // ADSR envelope
+        trackGain.gain.setValueAtTime(0, now);
+        trackGain.gain.linearRampToValueAtTime(peakGain, now + adsr.attack);
+        trackGain.gain.linearRampToValueAtTime(peakGain * adsr.sustain, now + adsr.attack + adsr.decay);
 
         source.connect(trackGain);
         trackGain.connect(this.compressor);
@@ -460,6 +471,13 @@ class OctadreAudioEngine {
         const startTime = sample.startOffset * duration;
         const endTime = sample.endOffset * duration;
         const playDuration = (endTime - startTime) / sample.pitch;
+
+        // Schedule release at the end of the clip
+        const releaseStart = now + playDuration - adsr.release;
+        if (releaseStart > now + adsr.attack + adsr.decay) {
+            trackGain.gain.setValueAtTime(peakGain * adsr.sustain, releaseStart);
+            trackGain.gain.linearRampToValueAtTime(0, releaseStart + adsr.release);
+        }
 
         // Stop any previous voices on this track (for one-shot behavior)
         this.stopTrack(trackIndex);
@@ -474,6 +492,75 @@ class OctadreAudioEngine {
         this.activeVoices.get(trackIndex).push(voice);
 
         // Cleanup when done
+        source.onended = () => {
+            const voices = this.activeVoices.get(trackIndex);
+            if (voices) {
+                const idx = voices.indexOf(voice);
+                if (idx !== -1) voices.splice(idx, 1);
+            }
+            trackGain.disconnect();
+        };
+    }
+
+    /**
+     * Play a sample at a specific pitch multiplier (for chromatic keyboard).
+     * pitchMultiplier: 1.0 = original, 2.0 = octave up, 0.5 = octave down
+     */
+    playSampleAtPitch(trackIndex, velocity = 127, pitchMultiplier = 1.0) {
+        const sample = this.trackSamples[trackIndex];
+        if (!sample || !sample.buffer || !this.audioContext) return;
+
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = sample.buffer;
+        source.playbackRate.value = pitchMultiplier;
+
+        // Per-track gain with ADSR envelope
+        const trackGain = this.audioContext.createGain();
+        const velocityScale = velocity / 127;
+        const peakGain = sample.gain * velocityScale;
+        const adsr = sample.adsr;
+        const now = this.audioContext.currentTime;
+
+        // ADSR envelope
+        trackGain.gain.setValueAtTime(0, now);
+        trackGain.gain.linearRampToValueAtTime(peakGain, now + adsr.attack);
+        trackGain.gain.linearRampToValueAtTime(peakGain * adsr.sustain, now + adsr.attack + adsr.decay);
+
+        source.connect(trackGain);
+        trackGain.connect(this.compressor);
+
+        const duration = sample.buffer.duration;
+        const startTime = sample.startOffset * duration;
+        const endTime = sample.endOffset * duration;
+        const playDuration = (endTime - startTime) / pitchMultiplier;
+
+        // Schedule release
+        const releaseStart = now + playDuration - adsr.release;
+        if (releaseStart > now + adsr.attack + adsr.decay) {
+            trackGain.gain.setValueAtTime(peakGain * adsr.sustain, releaseStart);
+            trackGain.gain.linearRampToValueAtTime(0, releaseStart + adsr.release);
+        }
+
+        // Hard-kill any previous voices immediately (no fade)
+        const prevVoices = this.activeVoices.get(trackIndex);
+        if (prevVoices) {
+            prevVoices.forEach(v => {
+                try { v.source.stop(0); v.gainNode.disconnect(); } catch (e) { }
+            });
+            this.activeVoices.set(trackIndex, []);
+        }
+        source.start(0, startTime, endTime - startTime);
+
+        if (!this.activeVoices.has(trackIndex)) {
+            this.activeVoices.set(trackIndex, []);
+        }
+        const voice = { source, gainNode: trackGain };
+        this.activeVoices.get(trackIndex).push(voice);
+
         source.onended = () => {
             const voices = this.activeVoices.get(trackIndex);
             if (voices) {
@@ -597,6 +684,166 @@ class OctadreAudioEngine {
 
     isReady() {
         return this.initialized && this.audioContext?.state === 'running';
+    }
+
+    // ──────────────────────────────────────────────
+    // SAVE / LOAD (base64 WAV encoding)
+    // ──────────────────────────────────────────────
+
+    /**
+     * Export all track samples as serializable objects with base64-encoded WAV data.
+     * Returns an array of 16 entries (null if no sample loaded).
+     */
+    exportSamples() {
+        return this.trackSamples.map((sample, i) => {
+            if (!sample || !sample.buffer) return null;
+
+            // Convert AudioBuffer → interleaved PCM → WAV → base64
+            const wavArrayBuffer = this._audioBufferToWav(sample.buffer);
+            const base64 = this._arrayBufferToBase64(wavArrayBuffer);
+
+            return {
+                name: sample.name,
+                gain: sample.gain,
+                pitch: sample.pitch,
+                startOffset: sample.startOffset,
+                endOffset: sample.endOffset,
+                adsr: { ...sample.adsr },
+                sampleRate: sample.buffer.sampleRate,
+                channels: sample.buffer.numberOfChannels,
+                duration: sample.buffer.duration,
+                wavBase64: base64
+            };
+        });
+    }
+
+    /**
+     * Import samples from saved data (output of exportSamples).
+     * Decodes base64 WAV back into AudioBuffers.
+     */
+    async importSamples(savedSamples) {
+        if (!savedSamples || !Array.isArray(savedSamples)) return;
+        if (!this.initialized) await this.init();
+
+        for (let i = 0; i < savedSamples.length; i++) {
+            const saved = savedSamples[i];
+            if (!saved || !saved.wavBase64) {
+                // No sample for this track — reset
+                this.trackSamples[i] = {
+                    buffer: null, name: null, fileHandle: null,
+                    gain: 1.0, pitch: 1.0, startOffset: 0, endOffset: 1,
+                    waveformData: null,
+                    adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
+                };
+                continue;
+            }
+
+            try {
+                const arrayBuffer = this._base64ToArrayBuffer(saved.wavBase64);
+                const audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
+
+                this.trackSamples[i] = {
+                    buffer: audioBuffer,
+                    name: saved.name || `Track ${i + 1}`,
+                    fileHandle: null,
+                    gain: saved.gain ?? 1.0,
+                    pitch: saved.pitch ?? 1.0,
+                    startOffset: saved.startOffset ?? 0,
+                    endOffset: saved.endOffset ?? 1,
+                    waveformData: this.generateWaveformData(audioBuffer),
+                    adsr: saved.adsr ?? { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
+                };
+
+                console.log(`[AudioEngine] Restored "${saved.name}" → Track ${i + 1}`);
+            } catch (err) {
+                console.error(`[AudioEngine] Failed to restore track ${i + 1}:`, err);
+                this.trackSamples[i] = {
+                    buffer: null, name: null, fileHandle: null,
+                    gain: 1.0, pitch: 1.0, startOffset: 0, endOffset: 1,
+                    waveformData: null,
+                    adsr: { attack: 0.005, decay: 0.1, sustain: 1.0, release: 0.05 }
+                };
+            }
+        }
+    }
+
+    // ── Encoding helpers ──
+
+    _audioBufferToWav(audioBuffer) {
+        const numChannels = audioBuffer.numberOfChannels;
+        const sampleRate = audioBuffer.sampleRate;
+        const format = 1; // PCM
+        const bitsPerSample = 16;
+
+        // Get channel data
+        const channels = [];
+        for (let i = 0; i < numChannels; i++) {
+            channels.push(audioBuffer.getChannelData(i));
+        }
+
+        const numFrames = audioBuffer.length;
+        const bytesPerSample = bitsPerSample / 8;
+        const blockAlign = numChannels * bytesPerSample;
+        const dataSize = numFrames * blockAlign;
+        const headerSize = 44;
+        const totalSize = headerSize + dataSize;
+
+        const buffer = new ArrayBuffer(totalSize);
+        const view = new DataView(buffer);
+
+        // WAV header
+        this._writeString(view, 0, 'RIFF');
+        view.setUint32(4, totalSize - 8, true);
+        this._writeString(view, 8, 'WAVE');
+        this._writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true); // fmt chunk size
+        view.setUint16(20, format, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * blockAlign, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+        this._writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        // Interleave and write PCM samples
+        let offset = 44;
+        for (let frame = 0; frame < numFrames; frame++) {
+            for (let ch = 0; ch < numChannels; ch++) {
+                let sample = channels[ch][frame];
+                sample = Math.max(-1, Math.min(1, sample));
+                sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                view.setInt16(offset, sample, true);
+                offset += 2;
+            }
+        }
+
+        return buffer;
+    }
+
+    _writeString(view, offset, str) {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+        }
+    }
+
+    _arrayBufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+    }
+
+    _base64ToArrayBuffer(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
     }
 }
 

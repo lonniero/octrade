@@ -78,6 +78,7 @@ function createStep() {
     return {
         active: false,
         notes: notes,
+        pitchNote: 60,          // chromatic pitch index (0-95), default C5
         chords: [],
         chordPlayMode: 0,
         chordScale: 0,
@@ -131,6 +132,20 @@ const state = {
     showCursor: true,
     copyMode: null, // null, 'step', 'track', 'scene'
     copyOrigin: null,
+    recordMode: false,      // real-time note recording
+    recHeld: false,         // REC button currently held (erase mode)
+    lastRecordedPitch: null,// last pitch from inner grid (for recording)
+    metronome: false,       // metronome click on each beat
+};
+
+// Launchpad physical button state
+const lpState = {
+    heldBigGridStep: -1,    // which big grid step is currently held (-1 = none)
+    shiftHeld: false,       // bottom-right pad [7,7] / note 18
+    copyHeld: false,        // top-left pad [0,0] / note 81
+    copySourceStep: -1,     // first step pressed while copy is held
+    leftShiftHeld: false,   // bottom-left pad [7,0] / note 11
+    leftShiftUsed: false,   // set true if LS was used in a combo
 };
 
 // ── Harmony State ──
@@ -162,6 +177,34 @@ for (let i = 0; i < 16; i++) {
         voicedNotes: [],
     });
 }
+
+// ── Chord Field state ──
+const chordFieldState = {
+    key: 0,                 // 0=C .. 11=B
+    modeIndex: 1,           // index into MODE_ORDER: 0=lydian..6=locrian, 1=ionian
+    voicingIndex: 0,        // index into VOICING_TYPES
+    octaveOffset: 0,        // -2..+2
+    rootRotation: 0,        // circle-of-4ths rotation offset
+    prevVoicing: null,      // last voiced chord (for voice leading)
+    activeNotes: [],        // currently sounding MIDI notes
+    glowGrid: null,         // flat 64-element glow array
+    lastChordLabel: '',     // display label
+    rhodes: null,           // shared or own RhodesSynth
+    activePadRow: -1,       // currently pressed pad row
+    activePadCol: -1,       // currently pressed pad col
+    // Humanization
+    velocityMode: 'humanize', // 'fixed' | 'humanize'
+    rollMode: 'off',          // 'off' | 'roll' | 'strum'
+    rhythmPattern: 0,         // index into CF_RHYTHM_PATTERNS
+    rhythmInterval: null,     // setInterval ID for rhythm
+    arpMode: 'off',           // 'off' | 'up' | 'down' | 'updown' | 'random'
+    arpRate: '8th',           // '8th' | '16th' | 'triplet'
+    arpInterval: null,        // setInterval ID for arp
+    arpIndex: 0,              // current position in arp sequence
+    arpDirection: 1,          // 1 = up, -1 = down (for updown mode)
+    arpLastNote: null,        // last arp note played (for cleanup)
+    arpNotes: [],             // computed arp note pool
+};
 
 let scenes = [createScene(), createScene(), createScene(), createScene()];
 
@@ -261,6 +304,11 @@ function handleMidiInput(event) {
     const [status, data1, data2] = event.data;
     const msgType = status & 0xF0;
 
+    // Raw MIDI debug (diagnose double-triggers)
+    if (msgType === 0x90 || msgType === 0x80 || msgType === 0xA0) {
+        console.log(`🔧 RAW MIDI: 0x${status.toString(16)} note=${data1} val=${data2}`);
+    }
+
     // ── MIDI Clock: 0xF8 ──
     if (status === 0xF8 && state.clockSource === 'midi') {
         state.clockTick++;
@@ -287,9 +335,28 @@ function handleMidiInput(event) {
     // Digital grid: row 0 = top, row 7 = bottom
     // So we FLIP: gridRow = 8 - Math.floor(note / 10)
     if (msgType === 0x90 && data2 > 0) {
-        // Right-side buttons (column 9: notes 19, 29, 39, ..., 89) — change track
+        // Debounce: ignore duplicate note-on within 80ms (hardware double-trigger)
+        const _now = performance.now();
+        if (!window._midiNoteDebounce) window._midiNoteDebounce = {};
+        if (_now - (window._midiNoteDebounce[data1] || 0) < 80) return;
+        window._midiNoteDebounce[data1] = _now;
+
+        console.log(`🎹 MIDI NoteOn: note=${data1} vel=${data2} leftShiftHeld=${lpState.leftShiftHeld}`);
+        // Right-side buttons (column 9: notes 19, 29, 39, ..., 89)
         if (data1 % 10 === 9 && data1 >= 19 && data1 <= 89) {
             const btnRow = 8 - Math.floor(data1 / 10);  // 89→0(top), 19→7(bottom)
+            if (state.mode === 'chordfield') {
+                // In chord field mode, side buttons select voicing type
+                handleChordFieldSideButton(btnRow);
+                renderGrid();
+                console.log(`🎹 LP side button: note=${data1} → voicing ${btnRow}`);
+                return;
+            }
+            if (state.mode === 'harmony') {
+                // In harmony mode, side buttons are unused — ignore
+                console.log(`🎹 LP harmony mode: side button ignored`);
+                return;
+            }
             const trackIndex = btnRow + (state.page * 8);
             if (trackIndex < scenes[state.currentScene].tracks.length) {
                 console.log(`🎹 LP side button: note=${data1} → track ${trackIndex}`);
@@ -298,13 +365,219 @@ function handleMidiInput(event) {
             return;
         }
 
+        // In chord field mode, bypass all corner/ring logic — full 8×8 grid
+        if (state.mode === 'chordfield' && data1 >= 11 && data1 <= 88) {
+            const gridRow = 8 - Math.floor(data1 / 10);
+            const gridCol = (data1 % 10) - 1;
+            if (gridRow >= 0 && gridRow < 8 && gridCol >= 0 && gridCol < 8) {
+                console.log(`🎹 LP chordfield pad: note=${data1} → grid[${gridRow},${gridCol}]`);
+                handleChordFieldPadPress(gridRow, gridCol);
+                return;
+            }
+        }
+
+        // In harmony mode, bypass corner buttons and sequencer combos —
+        // route everything through the ring grid handler
+        if (state.mode === 'harmony' && data1 >= 11 && data1 <= 88) {
+            const gridRow = 8 - Math.floor(data1 / 10);
+            const gridCol = (data1 % 10) - 1;
+            if (gridRow >= 0 && gridRow < 8 && gridCol >= 0 && gridCol < 8) {
+                console.log(`🎹 LP harmony pad: note=${data1} → grid[${gridRow},${gridCol}]`);
+                handlePadPress(gridRow, gridCol, { button: 0 });
+                return;
+            }
+        }
+
+        // ── Special corner buttons ──
+        // Top-left pad [0,0] = note 81 → Copy button (hold)
+        if (data1 === 81) {
+            lpState.copyHeld = true;
+            lpState.copySourceStep = -1;
+            console.log('🎹 LP Copy button HELD');
+            return;
+        }
+        // Top-right pad [0,7] = note 88 → Tempo modifier cycle
+        if (data1 === 88) {
+            changeTempo();
+            console.log(`🎹 LP Tempo modifier: ${getCurrentTrack().tempoModifier}x`);
+            return;
+        }
+        // Bottom-right pad [7,7] = note 18 → Shift (hold for BPM)
+        if (data1 === 18) {
+            // LS + RS combo = toggle metronome
+            if (lpState.leftShiftHeld) {
+                toggleMetronome();
+                lpState.leftShiftUsed = true;
+                return;
+            }
+            lpState.shiftHeld = true;
+            console.log('🎹 LP Shift button HELD');
+            return;
+        }
+        // Bottom-left pad [7,0] = note 11 → Left Shift
+        if (data1 === 11) {
+            // RS + LS combo = toggle metronome
+            if (lpState.shiftHeld) {
+                toggleMetronome();
+                return;
+            }
+            // If record mode ON + playing, hold = erase
+            if (state.recordMode && state.playing) {
+                state.recHeld = true;
+                lpState.leftShiftHeld = true;
+                lpState.leftShiftUsed = true;
+                console.log('🔴 LP REC held — erasing steps');
+                return;
+            }
+            lpState.leftShiftHeld = true;
+            lpState.leftShiftUsed = false;
+            console.log('🎹 LP Left Shift button HELD');
+            return;
+        }
+
         if (data1 >= 11 && data1 <= 88) {
             const gridRow = 8 - Math.floor(data1 / 10);   // 8→0(top), 1→7(bottom)
             const gridCol = (data1 % 10) - 1;              // 1-8 → 0-7
             if (gridRow >= 0 && gridRow < 8 && gridCol >= 0 && gridCol < 8) {
+
+                // In sample mode, bypass ring-grid logic — use full 8x8 grid
+                if (state.mode === 'sample') {
+                    console.log(`🎹 LP sample pad: note=${data1} → grid[${gridRow},${gridCol}]`);
+                    handlePadPress(gridRow, gridCol, { button: 0 });
+                    return;
+                }
+
+                const bigIdx = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === gridRow && c === gridCol);
+
+                // ── Left Shift + big grid step = set track length ──
+                if (lpState.leftShiftHeld && bigIdx !== -1) {
+                    const newLength = bigIdx + 1;
+                    changeTrackLength(newLength);
+                    lpState.leftShiftUsed = true;
+                    console.log(`🎹 LP Track length set to ${newLength}`);
+                    return;
+                }
+
+                // ── Left Shift + inner grid pad = toggle record mode ──
+                const innerIdx = LP_INNER_GRID.indexOf(data1);
+                if (lpState.leftShiftHeld && innerIdx !== -1) {
+                    state.recordMode = !state.recordMode;
+                    lpState.leftShiftUsed = true;
+                    console.log(`🔴 Record mode: ${state.recordMode ? 'ON' : 'OFF'}`);
+                    if (launchpadOutput) {
+                        launchpadOutput.send([0x90, 11, state.recordMode ? 5 : 1]);
+                    }
+                    renderGrid();
+                    return;
+                }
+
+                // ── Copy mode: hold Copy + press source, then press destination ──
+                if (lpState.copyHeld && bigIdx !== -1) {
+                    if (lpState.copySourceStep === -1) {
+                        // First press — set source
+                        lpState.copySourceStep = bigIdx;
+                        state.lastPressedStep = bigIdx;
+                        console.log(`🎹 LP Copy source: step ${bigIdx}`);
+                        renderGrid();
+                    } else {
+                        // Second press — execute copy
+                        const track = getCurrentTrack();
+                        track.pattern[bigIdx] = JSON.parse(JSON.stringify(track.pattern[lpState.copySourceStep]));
+                        console.log(`🎹 LP Copy: step ${lpState.copySourceStep} → step ${bigIdx}`);
+                        lpState.copySourceStep = -1;
+                        renderGrid();
+                        updateStepInfo();
+                    }
+                    return;
+                }
+
+                // ── Triplet creation: hold step A, press step B ──
+                // A+1 = 16th triplet (3 in 2 sixteenths),  A+4 = 8th triplet (3 in 1 quarter)
+                if (bigIdx !== -1 && lpState.heldBigGridStep !== -1 && bigIdx !== lpState.heldBigGridStep) {
+                    const stepA = Math.min(lpState.heldBigGridStep, bigIdx);
+                    const stepB = Math.max(lpState.heldBigGridStep, bigIdx);
+                    const gap = stepB - stepA;
+
+                    if (gap === 1 || gap === 3) {
+                        const tripletType = gap === 1 ? '16th' : '8th';
+                        const track = getCurrentTrack();
+                        if (stepB < track.trackLength) {
+                            // Step A = triplet source
+                            track.pattern[stepA].active = true;
+                            track.pattern[stepA].triplet = true;
+                            track.pattern[stepA].tripletType = tripletType;
+                            track.pattern[stepA].tripletSpan = gap;
+                            track.pattern[stepA].doubleNote = false;
+                            track.pattern[stepA].singleTriplet = false;
+
+                            // All steps from A+1 to B are consumed (silent markers)
+                            for (let s = stepA + 1; s <= stepB; s++) {
+                                track.pattern[s].active = true;
+                                track.pattern[s].singleTriplet = true;
+                                track.pattern[s].triplet = false;
+                                track.pattern[s].doubleNote = false;
+                                track.pattern[s].tripletType = null;
+                                track.pattern[s].tripletSpan = null;
+                            }
+
+                            console.log(`🎹 LP ${tripletType} Triplet created: steps ${stepA}-${stepB}`);
+                            state.lastPressedStep = stepA;
+                            renderGrid();
+                            updateStepInfo();
+                            return;
+                        }
+                    }
+                }
+
+                // Track which big grid step is held (for triplet detection)
+                if (bigIdx !== -1) {
+                    lpState.heldBigGridStep = bigIdx;
+                }
+
                 console.log(`🎹 LP pad: note=${data1} → grid[${gridRow},${gridCol}]`);
                 handlePadPress(gridRow, gridCol, { button: 0 });
                 return;
+            }
+        }
+    }
+
+    // ── Note Off / velocity 0 — release tracking ──
+    if (msgType === 0x80 || (msgType === 0x90 && data2 === 0)) {
+        // Release copy button
+        if (data1 === 81) {
+            lpState.copyHeld = false;
+            lpState.copySourceStep = -1;
+            console.log('🎹 LP Copy button RELEASED');
+            return;
+        }
+        // Release shift button
+        if (data1 === 18) {
+            lpState.shiftHeld = false;
+            console.log('🎹 LP Shift button RELEASED');
+            return;
+        }
+        // Release left shift button
+        if (data1 === 11) {
+            const wasErasing = state.recHeld;
+            state.recHeld = false;
+            lpState.leftShiftHeld = false;
+            // Toggle record mode only on quick tap (not used for length or erase)
+            if (!lpState.leftShiftUsed && !wasErasing) {
+                state.recordMode = !state.recordMode;
+                console.log(`🔴 Record mode: ${state.recordMode ? 'ON' : 'OFF'}`);
+                renderGrid();
+            }
+            lpState.leftShiftUsed = false;
+            console.log('🎹 LP Left Shift button RELEASED');
+            return;
+        }
+        // Release held big grid step
+        if (data1 >= 11 && data1 <= 88) {
+            const gridRow = 8 - Math.floor(data1 / 10);
+            const gridCol = (data1 % 10) - 1;
+            const bigIdx = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === gridRow && c === gridCol);
+            if (bigIdx !== -1 && bigIdx === lpState.heldBigGridStep) {
+                lpState.heldBigGridStep = -1;
             }
         }
     }
@@ -314,36 +587,48 @@ function handleMidiInput(event) {
         if (data1 >= 104 && data1 <= 111) {
             const buttonIdx = data1 - 104;
             console.log(`🎹 LP top button: CC${data1} → button ${buttonIdx}`);
+
+            // Chord Field mode has its own CC mapping
+            if (state.mode === 'chordfield') {
+                handleChordFieldCC(buttonIdx);
+                return;
+            }
+
             switch (buttonIdx) {
-                case 0: // Up arrow — previous track
-                    if (state.currentTrack > 0) {
-                        changeTrack(state.currentTrack - 1);
+                case 0: // Up arrow
+                    if (lpState.shiftHeld) {
+                        // Shift + Up = BPM +5
+                        state.bpm = Math.min(300, state.bpm + 5);
+                        document.getElementById('bpm-input').value = state.bpm;
+                        console.log(`🎹 LP BPM: ${state.bpm}`);
+                    } else {
+                        if (state.currentTrack > 0) changeTrack(state.currentTrack - 1);
                     }
                     break;
-                case 1: // Down arrow — next track
-                    if (state.currentTrack < scenes[state.currentScene].tracks.length - 1) {
-                        changeTrack(state.currentTrack + 1);
+                case 1: // Down arrow
+                    if (lpState.shiftHeld) {
+                        // Shift + Down = BPM -5
+                        state.bpm = Math.max(20, state.bpm - 5);
+                        document.getElementById('bpm-input').value = state.bpm;
+                        console.log(`🎹 LP BPM: ${state.bpm}`);
+                    } else {
+                        if (state.currentTrack < scenes[state.currentScene].tracks.length - 1) changeTrack(state.currentTrack + 1);
                     }
                     break;
-                case 2: // Left arrow — workspace down
-                    if (state.workspace > 0) {
-                        state.workspace--;
-                        renderGrid();
-                    }
+                case 2: // Left arrow — nudge pattern left
+                    shiftPatternLeft();
                     break;
-                case 3: // Right arrow — workspace up
-                    if (state.workspace < 2) {
-                        state.workspace++;
-                        renderGrid();
-                    }
+                case 3: // Right arrow — nudge pattern right
+                    shiftPatternRight();
                     break;
-                case 4: // Session — cycle workspace (0→1→2→0)
-                    state.workspace = (state.workspace + 1) % 3;
-                    renderGrid();
+                case 4: // Session — cycle through modes: seq→chords→harmony→sample→chordfield
+                    toggleMode();
                     break;
-                case 5: // User 1  
+                case 5: // User 1 — page 0 (tracks 1-8)
+                    changePage(0);
                     break;
-                case 6: // User 2
+                case 6: // User 2 — page 1 (tracks 9-16)
+                    changePage(1);
                     break;
                 case 7: // Mixer — toggle play
                     if (state.playing) {
@@ -446,37 +731,66 @@ function updateLaunchpadLEDs() {
         for (let lpCol = 1; lpCol <= 8; lpCol++) {
             const note = lpRow * 10 + lpCol;
             let color = LP_COLOR.OFF;
-
-            if (_sceneSet.has(note)) {
-                // Scene buttons — always visible, regardless of workspace
-                const si = _sceneLookup[note];
-                color = (si === state.currentScene) ? LP_COLOR.ACTIVE_SCENE : LP_COLOR.WHITE_DIM;
-            } else if (_bigSet.has(note)) {
-                const i = _bigLookup[note];
-                if (state.mode === 'seq') {
-                    color = getSeqBigPadColor(i, track, trackColor);
-                } else if (state.mode === 'harmony') {
-                    color = getHarmonyBigPadColor(i);
-                } else {
-                    color = trackColor;
+            // ── Chord Field & Harmony: use full 8×8 grid, skip corner logic ──
+            if (state.mode === 'chordfield') {
+                const digitalRow = 8 - lpRow;
+                const digitalCol = lpCol - 1;
+                color = getChordFieldLPColor(digitalRow, digitalCol);
+            } else if (state.mode === 'harmony' &&
+                (note === 81 || note === 88 || note === 18 || note === 11)) {
+                // Harmony mode corners are OFF
+                color = LP_COLOR.OFF;
+            } else if (note === 81) {
+                // Special corner buttons — only in sequencer/chords/sample modes
+                color = (lpState.copyHeld ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM);
+            } else if (note === 88) {
+                color = LP_COLOR.DOUBLE_NOTE;
+            } else if (note === 18) {
+                color = (lpState.shiftHeld ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM);
+            } else if (note === 11) {
+                color = (state.recordMode ? 5 : (lpState.leftShiftHeld ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM));
+            } else
+                if (state.mode === 'sample') {
+                    // Sample mode: full 8×8 grid (bypass ring layout)
+                    // Convert LP note to digital row/col
+                    // LP row 8 (top) = digital row 0, LP row 1 (bottom) = digital row 7
+                    const digitalRow = 8 - lpRow;
+                    const digitalCol = lpCol - 1;
+                    // Skip corners (handled above: 81, 88, 11, 18)
+                    if (!(digitalRow === 0 && digitalCol === 0) && !(digitalRow === 0 && digitalCol === 7) &&
+                        !(digitalRow === 7 && digitalCol === 0) && !(digitalRow === 7 && digitalCol === 7)) {
+                        color = getSampleEditLPColor(digitalRow, digitalCol, state.currentTrack);
+                    }
+                } else if (_sceneSet.has(note)) {
+                    // Scene buttons — always visible, regardless of workspace
+                    const si = _sceneLookup[note];
+                    color = (si === state.currentScene) ? LP_COLOR.ACTIVE_SCENE : LP_COLOR.WHITE_DIM;
+                } else if (_bigSet.has(note)) {
+                    const i = _bigLookup[note];
+                    if (state.mode === 'seq') {
+                        color = getSeqBigPadColor(i, track, trackColor);
+                    } else if (state.mode === 'harmony') {
+                        color = getHarmonyBigPadColor(i);
+                    } else {
+                        color = trackColor;
+                    }
+                } else if (_innerSet.has(note) && (state.workspace > 0 || state.mode === 'harmony')) {
+                    const i = _innerLookup[note];
+                    if (state.mode === 'seq') {
+                        color = getSeqInnerPadColor(i, track);
+                    } else if (state.mode === 'harmony') {
+                        color = getHarmonyInnerPadColor(i);
+                    } else {
+                        color = LP_COLOR.NON_ACTIVE_NOTE;
+                    }
+                } else if (_smallSet.has(note) && (state.workspace > 1 || state.mode === 'harmony')) {
+                    const i = _smallLookup[note];
+                    if (state.mode === 'seq') {
+                        color = getSeqSmallPadColor(i, track);
+                    } else if (state.mode === 'harmony') {
+                        color = getHarmonySmallPadColor(i);
+                    }
                 }
-            } else if (_innerSet.has(note) && (state.workspace > 0 || state.mode === 'harmony')) {
-                const i = _innerLookup[note];
-                if (state.mode === 'seq') {
-                    color = getSeqInnerPadColor(i, track);
-                } else if (state.mode === 'harmony') {
-                    color = getHarmonyInnerPadColor(i);
-                } else {
-                    color = LP_COLOR.NON_ACTIVE_NOTE;
-                }
-            } else if (_smallSet.has(note) && (state.workspace > 1 || state.mode === 'harmony')) {
-                const i = _smallLookup[note];
-                if (state.mode === 'seq') {
-                    color = getSeqSmallPadColor(i, track);
-                } else if (state.mode === 'harmony') {
-                    color = getHarmonySmallPadColor(i);
-                }
-            }
 
             // Note On ch1: sets LED color via velocity palette
             launchpadOutput.send([0x90, note, color]);
@@ -486,16 +800,24 @@ function updateLaunchpadLEDs() {
         const sideNote = lpRow * 10 + 9;
         if (_muteLookup[sideNote] !== undefined) {
             const i = _muteLookup[sideNote];
-            const allTracks = scenes[state.currentScene].tracks;
-            const trackIdx = i + (state.page * 8);
             let sideColor = LP_COLOR.OFF;
-            if (trackIdx < allTracks.length) {
-                const t = allTracks[trackIdx];
-                const tColor = LP_TRACK_COLORS[trackIdx % LP_TRACK_COLORS.length];
-                if (trackIdx === state.currentTrack) {
-                    sideColor = LP_COLOR.WHITE;
-                } else {
-                    sideColor = t.muted ? LP_COLOR.OFF : tColor;
+
+            if (state.mode === 'chordfield') {
+                sideColor = getChordFieldSideLPColor(i);
+            } else if (state.mode === 'harmony') {
+                // Harmony mode: side buttons unused — keep dark
+                sideColor = LP_COLOR.OFF;
+            } else {
+                const allTracks = scenes[state.currentScene].tracks;
+                const trackIdx = i + (state.page * 8);
+                if (trackIdx < allTracks.length) {
+                    const t = allTracks[trackIdx];
+                    const tColor = LP_TRACK_COLORS[trackIdx % LP_TRACK_COLORS.length];
+                    if (trackIdx === state.currentTrack) {
+                        sideColor = LP_COLOR.WHITE;
+                    } else {
+                        sideColor = t.muted ? LP_COLOR.OFF : tColor;
+                    }
                 }
             }
             launchpadOutput.send([0x90, sideNote, sideColor]);
@@ -512,6 +834,35 @@ function updateLaunchpadLEDs() {
 
         const flashMsg = LP_SYSEX_FLASH.concat([LP_BIG_GRID[state.lastPressedStep], flashColor, LP_SYSEX_END]);
         launchpadOutput.send(flashMsg);
+    }
+
+    // ── Top row CC button LEDs ──
+    // CC 104-111: Up, Down, Left, Right, Session, User1, User2, Mixer
+    if (state.mode === 'chordfield') {
+        // In chord field mode: arrows=dim, Session=bright green, User1/2=mode brightness indicators
+        const modeIdx = chordFieldState.modeIndex; // 0=brightest(Lydian) to 6=darkest(Locrian)
+        // User1 (brighter) lights up if we can go brighter
+        const user1Color = modeIdx > 0 ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM;
+        // User2 (darker) lights up if we can go darker
+        const user2Color = modeIdx < 6 ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM;
+        launchpadOutput.send([0xB0, 104, LP_COLOR.WHITE_DIM]); // Up (octave)
+        launchpadOutput.send([0xB0, 105, LP_COLOR.WHITE_DIM]); // Down (octave)
+        launchpadOutput.send([0xB0, 106, LP_COLOR.WHITE_DIM]); // Left (key)
+        launchpadOutput.send([0xB0, 107, LP_COLOR.WHITE_DIM]); // Right (key)
+        launchpadOutput.send([0xB0, 108, 21]);  // Session — green (active mode indicator)
+        launchpadOutput.send([0xB0, 109, user1Color]); // User1 (brighter mode)
+        launchpadOutput.send([0xB0, 110, user2Color]); // User2 (darker mode)
+        launchpadOutput.send([0xB0, 111, LP_COLOR.WHITE_DIM]); // Mixer (root rotation)
+    } else {
+        // Normal sequencer mode top-button LEDs
+        launchpadOutput.send([0xB0, 104, LP_COLOR.WHITE_DIM]); // Up
+        launchpadOutput.send([0xB0, 105, LP_COLOR.WHITE_DIM]); // Down
+        launchpadOutput.send([0xB0, 106, LP_COLOR.WHITE_DIM]); // Left
+        launchpadOutput.send([0xB0, 107, LP_COLOR.WHITE_DIM]); // Right
+        launchpadOutput.send([0xB0, 108, state.workspace === 0 ? LP_COLOR.WHITE : (state.workspace === 1 ? LP_COLOR.WARM_WHITE : LP_COLOR.ACTIVE_STEP)]); // Session
+        launchpadOutput.send([0xB0, 109, state.page === 0 ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM]); // User1
+        launchpadOutput.send([0xB0, 110, state.page === 1 ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM]); // User2
+        launchpadOutput.send([0xB0, 111, state.playing ? 21 : LP_COLOR.WHITE_DIM]); // Mixer (play)
     }
 }
 
@@ -542,8 +893,9 @@ function getSeqInnerPadColor(noteOffset, track) {
     const noteIndex = (state.currentOctave * 12) + noteOffset;
     const step = track.pattern[state.lastPressedStep];
 
-    if (noteIndex < 96 && step.notes[noteIndex]) {
-        return LP_COLOR.ACTIVE_NOTE;
+    // Single active pitch — red if this is the selected pitch
+    if (step.pitchNote === noteIndex) {
+        return 5; // LP red
     }
     return LP_COLOR.NON_ACTIVE_NOTE;
 }
@@ -737,6 +1089,8 @@ function stop() {
     if (window.audioEngine) window.audioEngine.stopAll();
     state.currentStep = 0;
     state.clockTick = -1;
+    window._lastTriggeredStep = {};
+    window._lastMidiStep = {};
     updatePlayButton();
     renderGrid();
 }
@@ -766,6 +1120,21 @@ function playSequencer() {
         triggerAudioSamples();
         // Trigger harmony chords
         triggerHarmonyChords();
+        // Metronome click on quarter notes (every 4 steps)
+        if (state.metronome && state.currentStep % 4 === 0) {
+            const beat = (state.currentStep / 4) % 4;
+            playMetronomeClick(beat === 0);
+        }
+        // Live erase: hold REC button to clear steps as sequencer passes
+        if (state.recordMode && state.recHeld && state.playing) {
+            const track = getCurrentTrack();
+            const playingStep = Math.floor(state.currentStep * track.tempoModifier) % track.trackLength;
+            track.pattern[playingStep].active = false;
+            track.pattern[playingStep].pitchNote = null;
+            track.pattern[playingStep].triplet = false;
+            track.pattern[playingStep].doubleNote = false;
+            track.pattern[playingStep].singleTriplet = false;
+        }
         state.currentStep++;
         renderGrid();
     }
@@ -775,27 +1144,105 @@ function playSequencer() {
     cleanupNoteQueue();
 }
 
+// Synthesized metronome click using oscillator
+function playMetronomeClick(isDownbeat) {
+    const ctx = window.audioEngine?.audioContext;
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.value = isDownbeat ? 1500 : 1000;  // higher pitch on beat 1
+
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);  // bypass compressor — always audible
+
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.05);
+}
+
+function toggleMetronome() {
+    state.metronome = !state.metronome;
+    const btn = document.getElementById('btn-metronome');
+    if (btn) btn.classList.toggle('active', state.metronome);
+    console.log(`🔔 Metronome: ${state.metronome ? 'ON' : 'OFF'}`);
+}
+
 function triggerAudioSamples() {
     if (!window.audioEngine || !window.audioEngine.initialized) return;
 
     const sceneIndex = getPlayingScene();
     const scene = scenes[sceneIndex];
+    const tickMs = (60000 / state.bpm) / 24;  // ms per MIDI tick
+
     scene.tracks.forEach((track, trackIndex) => {
         const trackStep = Math.floor(state.currentStep * track.tempoModifier);
         const stepIndex = trackStep % track.trackLength;
+
+        // Skip if this track step hasn't changed (prevents re-trigger at half tempo)
+        if (!window._lastTriggeredStep) window._lastTriggeredStep = {};
+        if (window._lastTriggeredStep[trackIndex] === trackStep) return;
+        window._lastTriggeredStep[trackIndex] = trackStep;
+
         const step = track.pattern[stepIndex];
-        if (step && step.active && !track.muted && window.audioEngine.hasSample(trackIndex)) {
-            window.audioEngine.playSample(trackIndex, step.velocity);
+        if (!step || !step.active || track.muted || !window.audioEngine.hasSample(trackIndex)) return;
+
+        // Skip if this track was just auditioned (prevents double-trigger during recording)
+        const lastAudition = _auditionDebounce.get(trackIndex) || 0;
+        if (performance.now() - lastAudition < 100) return;
+
+        // singleTriplet steps are silent — the triplet step already covers both
+        if (step.singleTriplet) return;
+
+        if (step.triplet) {
+            // 16th triplet: spacing=4 ticks (3 in 12 ticks), 8th triplet: spacing=8 ticks (3 in 24 ticks)
+            const ticks = step.tripletType === '8th' ? 8 : 4;
+            const spacingMs = (ticks / track.tempoModifier) * tickMs;
+            const pitch = getStepPitchMultiplier(step);
+            if (pitch !== null) {
+                window.audioEngine.playSampleAtPitch(trackIndex, step.velocity, pitch);
+                setTimeout(() => window.audioEngine.playSampleAtPitch(trackIndex, step.velocity, pitch), spacingMs);
+                setTimeout(() => window.audioEngine.playSampleAtPitch(trackIndex, step.velocity, pitch), spacingMs * 2);
+            } else {
+                window.audioEngine.playSample(trackIndex, step.velocity);
+                setTimeout(() => window.audioEngine.playSample(trackIndex, step.velocity), spacingMs);
+                setTimeout(() => window.audioEngine.playSample(trackIndex, step.velocity), spacingMs * 2);
+            }
+        } else {
+            const pitch = getStepPitchMultiplier(step);
+            if (pitch !== null) {
+                window.audioEngine.playSampleAtPitch(trackIndex, step.velocity, pitch);
+            } else {
+                window.audioEngine.playSample(trackIndex, step.velocity);
+            }
         }
     });
+}
+
+// Get pitch multiplier for a step (null = use default sample pitch)
+function getStepPitchMultiplier(step) {
+    if (step.pitchNote == null) return null;
+    const semitones = step.pitchNote - 60; // C5 = original pitch
+    return Math.pow(2, semitones / 12);
 }
 
 function queueMidiNotes() {
     const sceneIndex = getPlayingScene();
     const scene = scenes[sceneIndex];
-    scene.tracks.forEach(track => {
+    scene.tracks.forEach((track, trackIndex) => {
         const trackStep = Math.floor(state.currentStep * track.tempoModifier);
         const stepIndex = trackStep % track.trackLength;
+
+        // Skip if this track step hasn't changed (prevents re-trigger at half tempo)
+        if (!window._lastMidiStep) window._lastMidiStep = {};
+        if (window._lastMidiStep[trackIndex] === trackStep) return;
+        window._lastMidiStep[trackIndex] = trackStep;
+
         const step = track.pattern[stepIndex];
         if (step && step.active && !track.muted) {
             queueStep(track, step);
@@ -819,15 +1266,17 @@ function queueChords(track, step) {
 
 function addToQueue(step, track, note, clockTick) {
     if (step.triplet) {
-        const len = 4 / track.tempoModifier;
-        state.midiNotesQueue.push({ clockTick, length: len, note, channel: track.channel, velocity: step.velocity });
-        state.midiNotesQueue.push({ clockTick: clockTick + len, length: len, note, channel: track.channel, velocity: step.velocity });
-        state.midiNotesQueue.push({ clockTick: clockTick + len * 2, length: len, note, channel: track.channel, velocity: step.velocity });
+        // 16th triplet: 3 notes across 12 ticks (spacing=4), 8th triplet: 3 notes across 24 ticks (spacing=8)
+        const ticks = step.tripletType === '8th' ? 8 : 4;
+        const spacing = ticks / track.tempoModifier;
+        const noteLen = spacing;
+        state.midiNotesQueue.push({ clockTick, length: noteLen, note, channel: track.channel, velocity: step.velocity });
+        state.midiNotesQueue.push({ clockTick: clockTick + spacing, length: noteLen, note, channel: track.channel, velocity: step.velocity });
+        state.midiNotesQueue.push({ clockTick: clockTick + spacing * 2, length: noteLen, note, channel: track.channel, velocity: step.velocity });
     } else if (step.singleTriplet) {
-        const len = 2 / track.tempoModifier;
-        state.midiNotesQueue.push({ clockTick, length: len, note, channel: track.channel, velocity: step.velocity });
-        state.midiNotesQueue.push({ clockTick: clockTick + len, length: len, note, channel: track.channel, velocity: step.velocity });
-        state.midiNotesQueue.push({ clockTick: clockTick + len * 2, length: len, note, channel: track.channel, velocity: step.velocity });
+        // singleTriplet is just a visual marker — the triplet step (A) already
+        // plays all 3 notes spanning both steps. Don't play anything here.
+        return;
     } else if (step.doubleNote) {
         const len = 4 / track.tempoModifier;
         state.midiNotesQueue.push({ clockTick, length: len, note, channel: track.channel, velocity: step.velocity });
@@ -883,7 +1332,49 @@ function getCurrentTrack() {
 function toggleStep(stepIndex) {
     const track = getCurrentTrack();
     if (stepIndex >= track.trackLength) return;
-    if (track.pattern[stepIndex].triplet) return;
+
+    // If this step is part of a triplet group, clear the entire group
+    if (track.pattern[stepIndex].triplet) {
+        // This is step A — clear it and all consumed steps
+        const span = track.pattern[stepIndex].tripletSpan || 1;
+        track.pattern[stepIndex].active = false;
+        track.pattern[stepIndex].triplet = false;
+        track.pattern[stepIndex].tripletType = null;
+        track.pattern[stepIndex].tripletSpan = null;
+        for (let s = stepIndex + 1; s <= stepIndex + span && s < 16; s++) {
+            track.pattern[s].active = false;
+            track.pattern[s].singleTriplet = false;
+        }
+        state.lastPressedStep = stepIndex;
+        renderGrid();
+        updateStepInfo();
+        return;
+    }
+    if (track.pattern[stepIndex].singleTriplet) {
+        // This is a consumed step — find step A (scan backwards)
+        track.pattern[stepIndex].active = false;
+        track.pattern[stepIndex].singleTriplet = false;
+        // Find the triplet source step
+        for (let s = stepIndex - 1; s >= 0; s--) {
+            if (track.pattern[s].triplet) {
+                const span = track.pattern[s].tripletSpan || 1;
+                track.pattern[s].active = false;
+                track.pattern[s].triplet = false;
+                track.pattern[s].tripletType = null;
+                track.pattern[s].tripletSpan = null;
+                // Clear all consumed steps in the group
+                for (let c = s + 1; c <= s + span && c < 16; c++) {
+                    track.pattern[c].active = false;
+                    track.pattern[c].singleTriplet = false;
+                }
+                break;
+            }
+        }
+        state.lastPressedStep = stepIndex;
+        renderGrid();
+        updateStepInfo();
+        return;
+    }
 
     track.pattern[stepIndex].active = !track.pattern[stepIndex].active;
     track.pattern[stepIndex].doubleNote = false;
@@ -895,11 +1386,47 @@ function toggleStep(stepIndex) {
 
 function toggleNote(noteOffset) {
     const track = getCurrentTrack();
+    const trackIndex = scenes[state.currentScene].tracks.indexOf(track);
     const noteIndex = (state.currentOctave * 12) + noteOffset;
     if (noteIndex >= 96) return;
-    track.pattern[state.lastPressedStep].notes[noteIndex] = !track.pattern[state.lastPressedStep].notes[noteIndex];
+
+    const step = track.pattern[state.lastPressedStep];
+
+    // Always set the new pitch (no toggle-off)
+    step.pitchNote = noteIndex;
+
+    // Audition: play the sample at this pitch
+    auditionPitch(trackIndex, noteIndex);
+
+    // Record mode: write to current playing step
+    if (state.recordMode && state.playing) {
+        const playingStep = Math.floor(state.currentStep * track.tempoModifier) % track.trackLength;
+        track.pattern[playingStep].active = true;
+        track.pattern[playingStep].pitchNote = noteIndex;
+    }
+    // Always remember last pitch for overdub
+    state.lastRecordedPitch = noteIndex;
+
     renderGrid();
     updateStepInfo();
+}
+
+// Play a sample at a chromatic pitch offset
+// noteIndex 60 = original pitch (C5), each semitone = 2^(1/12)
+const _auditionDebounce = new Map();
+function auditionPitch(trackIndex, noteIndex) {
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return;
+
+    // Debounce: prevent double-triggers within 50ms
+    const now = performance.now();
+    const lastTime = _auditionDebounce.get(trackIndex) || 0;
+    if (now - lastTime < 50) return;
+    _auditionDebounce.set(trackIndex, now);
+
+    // Reference: noteIndex 60 (C5) = original sample pitch (1.0)
+    const semitones = noteIndex - 60;
+    const pitchMultiplier = Math.pow(2, semitones / 12);
+    window.audioEngine.playSampleAtPitch(trackIndex, 127, pitchMultiplier);
 }
 
 function handleSmallGridPress(gridIndex) {
@@ -1021,6 +1548,8 @@ function setMode(mode) {
     document.getElementById('btn-mode-seq').classList.toggle('active', mode === 'seq');
     document.getElementById('btn-mode-chords').classList.toggle('active', mode === 'chords');
     document.getElementById('btn-mode-harmony').classList.toggle('active', mode === 'harmony');
+    document.getElementById('btn-mode-sample').classList.toggle('active', mode === 'sample');
+    document.getElementById('btn-mode-chordfield').classList.toggle('active', mode === 'chordfield');
 
     // Show/hide harmony controls
     const harmonyControls = document.getElementById('harmony-controls');
@@ -1028,17 +1557,42 @@ function setMode(mode) {
         harmonyControls.classList.toggle('hidden', mode !== 'harmony');
     }
 
-    // Initialize Rhodes on first harmony mode entry
+    // Show/hide chord field controls
+    const cfControls = document.getElementById('chordfield-controls');
+    if (cfControls) {
+        cfControls.classList.toggle('hidden', mode !== 'chordfield');
+    }
+
+    // Stop chord field playback when switching away
+    if (mode !== 'chordfield' && typeof cfStopPlayback === 'function') {
+        cfStopPlayback(chordFieldState);
+        chordFieldState.activeNotes = [];
+    }
+
+    // Initialize Rhodes on first harmony/chordfield mode entry
     if (mode === 'harmony' && !harmonyState.rhodes) {
         initRhodes();
+    }
+    if (mode === 'chordfield') {
+        initChordFieldRhodes();
     }
 
     renderGrid();
     if (mode === 'harmony') updateHarmonyUI();
+    if (mode === 'chordfield') updateChordFieldUI();
+
+    // Auto-expand/collapse the sample editor panel
+    const editor = document.getElementById('sample-editor');
+    if (editor) {
+        if (mode === 'sample') {
+            editor.classList.remove('collapsed');
+            updateSampleEditor();
+        }
+    }
 }
 
 function toggleMode() {
-    const modes = ['seq', 'chords', 'harmony'];
+    const modes = ['seq', 'chords', 'harmony', 'sample', 'chordfield'];
     const currentIdx = modes.indexOf(state.mode);
     setMode(modes[(currentIdx + 1) % modes.length]);
 }
@@ -1107,45 +1661,114 @@ function updateCopyButtons() {
 
 // Save / Load
 function saveProject() {
-    const data = {
-        scenes: scenes,
-        state: {
-            currentOctave: state.currentOctave,
-            bpm: state.bpm,
+    try {
+        const data = {
+            version: 2,
+            scenes: scenes,
+            state: {
+                currentOctave: state.currentOctave,
+                bpm: state.bpm,
+                currentScene: state.currentScene,
+                currentTrack: state.currentTrack,
+            },
+            samples: window.audioEngine ? window.audioEngine.exportSamples() : null
+        };
+
+        const json = JSON.stringify(data);
+        const now = new Date();
+        const ts = now.toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+        const filename = `octadre-${ts}.json`;
+
+        // Use File System Access API for a proper "Save As" dialog
+        if ('showSaveFilePicker' in window) {
+            (async () => {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: filename,
+                        types: [{
+                            description: 'Octadre Project',
+                            accept: { 'application/json': ['.json'] }
+                        }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(json);
+                    await writable.close();
+                    console.log(`[Save] Project saved to "${handle.name}" (${(json.length / 1024 / 1024).toFixed(1)} MB)`);
+                } catch (err) {
+                    if (err.name === 'AbortError') {
+                        console.log('[Save] Cancelled by user');
+                    } else {
+                        console.error('[Save] Failed:', err);
+                        alert('Failed to save: ' + err.message);
+                    }
+                }
+            })();
+        } else {
+            // Fallback for browsers without File System Access
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+            console.log(`[Save] Project saved (${(json.length / 1024 / 1024).toFixed(1)} MB)`);
         }
-    };
-    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'octadre-project.json';
-    a.click();
-    URL.revokeObjectURL(url);
+    } catch (err) {
+        console.error('[Save] Failed to save project:', err);
+        alert('Failed to save project: ' + err.message);
+    }
 }
 
 function loadProject() {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
-    input.onchange = (e) => {
+    input.onchange = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-            try {
-                const data = JSON.parse(ev.target.result);
-                scenes = data.scenes;
-                if (data.state) {
-                    state.currentOctave = data.state.currentOctave || 5;
-                    state.bpm = data.state.bpm || 120;
-                    document.getElementById('bpm-input').value = state.bpm;
-                }
-                renderAll();
-            } catch (err) {
-                console.error('Failed to load project:', err);
+
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+
+            // Restore scenes and patterns
+            scenes = data.scenes;
+
+            // Migrate: ensure all steps have pitchNote (default C5)
+            scenes.forEach(scene => {
+                scene.tracks.forEach(track => {
+                    track.pattern.forEach(step => {
+                        if (step.pitchNote == null) step.pitchNote = 60;
+                    });
+                });
+            });
+
+            // Restore state
+            if (data.state) {
+                state.currentOctave = data.state.currentOctave || 5;
+                state.bpm = data.state.bpm || 120;
+                state.currentScene = data.state.currentScene || 0;
+                state.currentTrack = data.state.currentTrack || 0;
+                document.getElementById('bpm-input').value = state.bpm;
             }
-        };
-        reader.readAsText(file);
+
+            // Restore audio samples if present
+            if (data.samples && window.audioEngine) {
+                console.log('[Load] Restoring audio samples...');
+                await window.audioEngine.importSamples(data.samples);
+                console.log('[Load] Audio samples restored');
+            }
+
+            renderAll();
+            console.log(`[Load] Project loaded from "${file.name}"`);
+        } catch (err) {
+            console.error('Failed to load project:', err);
+            alert('Failed to load project: ' + err.message);
+        }
     };
     input.click();
 }
@@ -1166,7 +1789,21 @@ function buildGrid() {
             pad.dataset.col = col;
             pad.id = `pad-${row}-${col}`;
 
-            pad.addEventListener('mousedown', (e) => handlePadPress(row, col, e));
+            pad.addEventListener('mousedown', (e) => {
+                // REC button: if already in record mode, hold = erase
+                if (row === 7 && col === 0 && state.recordMode && state.playing) {
+                    state.recHeld = true;
+                    console.log('🔴 REC held — erasing steps');
+                    return; // don't toggle off
+                }
+                handlePadPress(row, col, e);
+            });
+            pad.addEventListener('mouseup', (e) => {
+                if (row === 7 && col === 0 && state.recHeld) {
+                    state.recHeld = false;
+                    console.log('🔴 REC released — erase stopped');
+                }
+            });
             pad.addEventListener('contextmenu', (e) => e.preventDefault());
 
             grid.appendChild(pad);
@@ -1183,6 +1820,10 @@ function buildSideButtons() {
         btn.className = 'side-btn';
         btn.dataset.index = i;
         btn.addEventListener('click', () => {
+            if (state.mode === 'chordfield') {
+                handleChordFieldSideButton(i);
+                return;
+            }
             const trackIndex = i + (state.page * 8);
             if (state.copyMode === 'track') {
                 executeCopy(trackIndex);
@@ -1275,6 +1916,47 @@ function renderTrackList() {
 }
 
 function handlePadPress(row, col, event) {
+    // In chord field mode, the full 8x8 grid is used — skip corner/scene buttons
+    if (state.mode === 'chordfield') {
+        handleChordFieldPadPress(row, col);
+        return;
+    }
+
+    // In harmony mode, bypass corner buttons and scene buttons —
+    // the ring grid handles all positions via big/inner/small indices
+    if (state.mode === 'harmony') {
+        const bigGridIndex = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+        const innerGridIndex = INNER_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+        const smallGridIndex = SMALL_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+        handleHarmonyPadPress(row, col, bigGridIndex, innerGridIndex, smallGridIndex);
+        return;
+    }
+
+    // Special corner buttons (digital click handlers)
+    if (row === 0 && col === 0) {
+        // Copy button — toggle step copy mode
+        startCopy('step');
+        return;
+    }
+    if (row === 0 && col === 7) {
+        // Tempo modifier button
+        changeTempo();
+        return;
+    }
+    if (row === 7 && col === 7) {
+        // Shift button — no action on click (hold-only on physical)
+        return;
+    }
+    if (row === 7 && col === 0) {
+        // LS / REC button — toggle record mode on click
+        // Hold tracking is done via mousedown/mouseup on the pad element
+        state.recordMode = !state.recordMode;
+        state.recHeld = false;
+        console.log(`🔴 Record mode: ${state.recordMode ? 'ON' : 'OFF'}`);
+        renderGrid();
+        return;
+    }
+
     // Determine what this pad represents
     const bigGridIndex = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
     const innerGridIndex = INNER_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
@@ -1312,6 +1994,10 @@ function handlePadPress(row, col, event) {
         // Chord mode — simplified for web version
     } else if (state.mode === 'harmony') {
         handleHarmonyPadPress(row, col, bigGridIndex, innerGridIndex, smallGridIndex);
+    } else if (state.mode === 'sample') {
+        handleSamplePadPress(row, col);
+    } else if (state.mode === 'chordfield') {
+        handleChordFieldPadPress(row, col);
     }
 }
 
@@ -1332,8 +2018,74 @@ function renderGrid() {
             pad.style.background = '';
             pad.style.borderColor = '';
             pad.style.boxShadow = '';
+            pad.style.opacity = '';
             pad.textContent = '';
 
+            // Chord field mode: full grid, skip corner/scene rendering
+            if (state.mode === 'chordfield') {
+                renderChordFieldPad(pad, row, col);
+                continue;
+            }
+
+            // Special corner buttons (always rendered)
+            if (row === 0 && col === 0) {
+                // Copy button (top-left)
+                pad.textContent = 'CPY';
+                pad.style.fontSize = '10px';
+                if (lpState.copyHeld || state.copyMode === 'step') {
+                    pad.style.background = 'var(--accent)';
+                    pad.style.borderColor = 'var(--accent)';
+                    pad.style.color = 'var(--bg-primary)';
+                } else {
+                    pad.style.background = 'rgba(60, 65, 80, 0.6)';
+                    pad.style.borderColor = 'rgba(120, 130, 150, 0.3)';
+                    pad.style.color = 'var(--text-secondary)';
+                }
+                continue;
+            }
+            if (row === 0 && col === 7) {
+                // Tempo modifier button (top-right)
+                pad.textContent = track.tempoModifier + 'x';
+                pad.style.fontSize = '10px';
+                pad.style.background = 'rgba(180, 130, 20, 0.5)';
+                pad.style.borderColor = 'rgba(200, 160, 40, 0.5)';
+                pad.style.color = '#ffc800';
+                continue;
+            }
+            if (row === 7 && col === 7) {
+                // Shift button (bottom-right)
+                pad.textContent = '⇧';
+                pad.style.fontSize = '14px';
+                if (lpState.shiftHeld) {
+                    pad.style.background = 'var(--accent)';
+                    pad.style.borderColor = 'var(--accent)';
+                    pad.style.color = 'var(--bg-primary)';
+                } else {
+                    pad.style.background = 'rgba(60, 65, 80, 0.6)';
+                    pad.style.borderColor = 'rgba(120, 130, 150, 0.3)';
+                    pad.style.color = 'var(--text-secondary)';
+                }
+                continue;
+            }
+            if (row === 7 && col === 0) {
+                // Record / Left Shift button (bottom-left)
+                pad.textContent = 'REC';
+                pad.style.fontSize = '10px';
+                if (state.recordMode) {
+                    pad.style.background = '#e53935';
+                    pad.style.borderColor = '#e53935';
+                    pad.style.color = '#fff';
+                } else if (lpState.leftShiftHeld) {
+                    pad.style.background = 'var(--accent)';
+                    pad.style.borderColor = 'var(--accent)';
+                    pad.style.color = 'var(--bg-primary)';
+                } else {
+                    pad.style.background = 'rgba(60, 65, 80, 0.6)';
+                    pad.style.borderColor = 'rgba(120, 130, 150, 0.3)';
+                    pad.style.color = 'var(--text-secondary)';
+                }
+                continue;
+            }
             // Check if this is a scene button (always rendered, regardless of mode/workspace)
             const sceneIdx = SCENE_POSITIONS.findIndex(([r, c]) => r === row && c === col);
 
@@ -1366,6 +2118,10 @@ function renderGrid() {
                 renderChordPad(pad, row, col);
             } else if (state.mode === 'harmony') {
                 renderHarmonyPad(pad, row, col, bigIdx, innerIdx, smallIdx);
+            } else if (state.mode === 'sample') {
+                renderSampleEditPad(pad, row, col);
+            } else if (state.mode === 'chordfield') {
+                renderChordFieldPad(pad, row, col);
             }
         }
     }
@@ -1422,10 +2178,13 @@ function renderInnerGridPad(pad, noteOffset, track) {
     const noteIndex = (state.currentOctave * 12) + noteOffset;
     const step = track.pattern[state.lastPressedStep];
 
-    if (noteIndex < 96 && step.notes[noteIndex]) {
+    // Single pitch — red for active, dim for inactive
+    if (step.pitchNote === noteIndex) {
         pad.classList.add('note-active');
+        pad.style.background = '#e53935';  // red for active pitch
     } else {
         pad.classList.add('note-inactive');
+        pad.style.background = '';
     }
 
     // Show note name
@@ -1471,6 +2230,10 @@ function renderChordPad(pad, row, col) {
 }
 
 function renderSideButtons() {
+    if (state.mode === 'chordfield') {
+        renderChordFieldSideButtons();
+        return;
+    }
     const container = document.getElementById('side-buttons');
     const buttons = container.querySelectorAll('.side-btn');
 
@@ -1574,6 +2337,12 @@ function updateSampleSlotUI() {
         pitchValue.textContent = `${sample.pitch.toFixed(2)}x`;
 
         window.audioEngine.drawWaveform(canvas, trackIndex);
+    }
+
+    // Refresh sample editor if open
+    const editor = document.getElementById('sample-editor');
+    if (editor && !editor.classList.contains('collapsed')) {
+        updateSampleEditor();
     }
 }
 
@@ -2159,10 +2928,18 @@ function recomputeHarmony() {
 
 function previewHarmonyStep(stepIndex) {
     ensureRhodes();
-    if (!harmonyState.rhodes) return;
+    if (!harmonyState.rhodes) {
+        console.warn('[Harmony] Rhodes synth not available — cannot preview');
+        return;
+    }
 
     const step = harmonyState.pattern[stepIndex];
-    if (!step.active || step.voicedNotes.length === 0) return;
+    if (!step.active || step.voicedNotes.length === 0) {
+        console.log(`[Harmony] Step ${stepIndex}: active=${step.active}, voicedNotes=${JSON.stringify(step.voicedNotes)}`);
+        return;
+    }
+
+    console.log(`[Harmony] Preview step ${stepIndex}: notes=${JSON.stringify(step.voicedNotes)}`);
 
     // Release previous preview
     harmonyState.rhodes.allNotesOff();
@@ -2345,13 +3122,1218 @@ function setupHarmonyListeners() {
 }
 
 // ──────────────────────────────────────────────
+// SAMPLE EDITOR GRID MODE
+// ──────────────────────────────────────────────
+//
+// Layout on the 8×8 grid / Launchpad:
+//   Rows 0-4  : Waveform visualizer (8 cols × 5 rows)
+//               Each column = 1/8th of the sample
+//               Amplitude bars grow upward from row 4
+//               Active region (between IN/OUT) = bright track color
+//               Outside region = dim
+//               IN column base = red, OUT column base = blue
+//               Tap a column to move nearest marker
+//   Row 5     : ADSR envelope curve (8 pads, brightness = height)
+//   Row 6     : A- A+ D- D+ S- S+ R- R+ (parameter pair controls)
+//   Row 7     : LS (auto) ... preview ... RS (auto)
+
+const sampleEditState = {
+    selectedParam: 'attack',   // which ADSR param is highlighted
+};
+
+// Compute 8-column amplitude data from waveformData
+function getSampleAmplitudes(trackIndex) {
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return null;
+    const data = window.audioEngine.trackSamples[trackIndex].waveformData;
+    if (!data || data.length === 0) return null;
+    const amps = new Array(8).fill(0);
+    const chunkSize = Math.floor(data.length / 8);
+    for (let col = 0; col < 8; col++) {
+        let max = 0;
+        const start = col * chunkSize;
+        const end = Math.min(start + chunkSize, data.length);
+        for (let i = start; i < end; i++) {
+            if (data[i] > max) max = data[i];
+        }
+        amps[col] = max;
+    }
+    return amps;
+}
+
+// Compute ADSR envelope heights at 8 positions (0-1)
+function getADSRCurveValues(trackIndex) {
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) {
+        return [0, 0, 0, 0, 0, 0, 0, 0];
+    }
+    const adsr = window.audioEngine.trackSamples[trackIndex].adsr;
+    const a = adsr.attack, d = adsr.decay, s = adsr.sustain, r = adsr.release;
+    const total = a + d + 0.2 + r; // 0.2 = sustain hold time
+
+    // Map envelope to 8 positions
+    const values = [];
+    for (let i = 0; i < 8; i++) {
+        const t = (i / 7) * total;
+        let v = 0;
+        if (t <= a) {
+            v = a > 0 ? t / a : 1; // attack ramp
+        } else if (t <= a + d) {
+            v = 1 - (1 - s) * ((t - a) / (d || 0.001)); // decay
+        } else if (t <= a + d + 0.2) {
+            v = s; // sustain hold
+        } else {
+            const rt = t - (a + d + 0.2);
+            v = s * (1 - rt / (r || 0.001)); // release
+        }
+        values.push(Math.max(0, Math.min(1, v)));
+    }
+    return values;
+}
+
+// ADSR param colors for row 6 (LP MK2 palette indices)
+const ADSR_COLORS = {
+    attack: { bright: 72, dim: 71 },  // warm amber
+    decay: { bright: 9, dim: 11 },  // orange
+    sustain: { bright: 29, dim: 27 },  // green
+    release: { bright: 45, dim: 43 },  // blue
+};
+const ADSR_PARAM_ORDER = ['attack', 'decay', 'sustain', 'release'];
+
+// ══════════════════════════════════════════════════════════
+// CHORD FIELD MODE
+// ══════════════════════════════════════════════════════════
+
+const CF_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+// Row colors by chord quality row (CSS) — neutral base, glow provides meaning
+const CF_BASE_COLOR = 'rgba(40, 55, 70, 0.5)';       // uniform dark teal-grey
+const CF_BASE_BORDER = 'rgba(80, 100, 120, 0.25)';
+
+// Glow-driven colors: from dim (no shared notes) to bright (3+ shared)
+const CF_GLOW_CSS = [
+    'rgba(35, 45, 55, 0.45)',     // 0: dark — no harmonic connection
+    'rgba(60, 90, 120, 0.6)',     // 1: cool blue — weak connection
+    'rgba(180, 160, 60, 0.75)',   // 2: warm amber — moderate connection
+    'rgba(255, 240, 180, 0.95)',  // 3: bright warm — strong connection
+];
+const CF_GLOW_BORDER = [
+    'rgba(60, 75, 90, 0.2)',      // 0
+    'rgba(80, 120, 160, 0.35)',   // 1
+    'rgba(200, 180, 80, 0.5)',    // 2
+    'rgba(255, 240, 200, 0.7)',   // 3
+];
+
+// LP MK2 colors: glow-driven (dark to bright)
+const CF_LP_GLOW_COLORS = [43, 45, 9, 3]; // dark teal, mid teal, amber, white
+const CF_LP_BASE_COLOR = 45;  // neutral teal for pre-glow state
+
+// Glow multipliers for CSS opacity (less relevant now, but kept for fallback)
+const CF_GLOW_OPACITY = [0.3, 0.6, 0.85, 1.0]; // 0,1,2,3 shared notes
+
+// ── Rhythm Pattern Presets (16th-note grid, 16 steps = 1 bar) ──
+const CF_RHYTHM_PATTERNS = [
+    { name: 'Sustain', pattern: null },  // hold, no re-trigger
+    { name: 'Quarter', pattern: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0] },
+    { name: 'Offbeat', pattern: [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0] },
+    { name: 'Bounce', pattern: [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0] },
+    { name: 'Tresillo', pattern: [1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0] },
+    { name: '8ths', pattern: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0] },
+];
+
+const CF_ARP_MODES = ['off', 'up', 'down', 'updown', 'random'];
+const CF_ARP_RATES = ['8th', '16th', 'triplet'];
+
+// ── Humanization Engine ──
+
+function cfGetVelocity(cf) {
+    if (cf.velocityMode === 'humanize') {
+        return Math.floor(80 + Math.random() * 47); // 80–127
+    }
+    return 100;
+}
+
+function cfPlayChordHumanized(cf, voiced) {
+    const rhodes = cf.rhodes;
+    if (!rhodes) return;
+
+    if (cf.rollMode === 'strum') {
+        // Bottom-to-top stagger: 15ms between each note
+        voiced.forEach((n, i) => {
+            setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), i * 15);
+        });
+    } else if (cf.rollMode === 'roll') {
+        // Random per-note delay: 5–25ms
+        voiced.forEach(n => {
+            setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), Math.random() * 25 + 5);
+        });
+    } else {
+        // Simultaneous
+        voiced.forEach(n => rhodes.noteOn(n, cfGetVelocity(cf)));
+    }
+}
+
+function cfStopPlayback(cf) {
+    // Stop rhythm
+    if (cf.rhythmInterval) {
+        clearInterval(cf.rhythmInterval);
+        cf.rhythmInterval = null;
+    }
+    // Stop arp
+    if (cf.arpInterval) {
+        clearInterval(cf.arpInterval);
+        cf.arpInterval = null;
+    }
+    // Release last arp note if one is still sounding
+    if (cf.arpLastNote !== null && cf.arpLastNote !== undefined && cf.rhodes) {
+        cf.rhodes.noteOff(cf.arpLastNote);
+        cf.arpLastNote = null;
+    }
+    // Release any active chord notes
+    if (cf.rhodes && cf.activeNotes.length > 0) {
+        cf.activeNotes.forEach(n => cf.rhodes.noteOff(n));
+    }
+    cf.arpIndex = 0;
+    cf.arpDirection = 1;
+}
+
+function cfStartRhythm(cf) {
+    const preset = CF_RHYTHM_PATTERNS[cf.rhythmPattern];
+    if (!preset || !preset.pattern) return; // sustain mode, no rhythm
+
+    const pattern = preset.pattern;
+    const sixteenthMs = (60000 / state.bpm) / 4; // ms per 16th note
+    let step = 0;
+    let isOn = true; // chord was just played, so it's already on
+
+    cf.rhythmInterval = setInterval(() => {
+        const hit = pattern[step % pattern.length] === 1;
+        if (hit && !isOn) {
+            // Re-trigger: play chord
+            cfPlayChordHumanized(cf, cf.activeNotes);
+            isOn = true;
+        } else if (!hit && isOn) {
+            // Off-beat: release notes for rhythmic gap
+            cf.activeNotes.forEach(n => cf.rhodes.noteOff(n));
+            isOn = false;
+        }
+        step++;
+    }, sixteenthMs);
+}
+
+function cfStartArp(cf) {
+    if (cf.arpMode === 'off' || cf.arpNotes.length === 0) return;
+
+    // Calculate interval based on rate
+    let rateMs;
+    const beatMs = 60000 / state.bpm;
+    switch (cf.arpRate) {
+        case '16th': rateMs = beatMs / 4; break;
+        case 'triplet': rateMs = beatMs / 3; break;
+        default: rateMs = beatMs / 2; break; // 8th
+    }
+
+    cf.arpLastNote = null;
+    cf.arpInterval = setInterval(() => {
+        const notes = cf.arpNotes;
+        if (notes.length === 0) return;
+
+        // Release previous arp note
+        if (cf.arpLastNote !== null) cf.rhodes.noteOff(cf.arpLastNote);
+
+        // Get next note based on mode
+        let note;
+        switch (cf.arpMode) {
+            case 'up':
+                note = notes[cf.arpIndex % notes.length];
+                cf.arpIndex++;
+                break;
+            case 'down':
+                note = notes[(notes.length - 1) - (cf.arpIndex % notes.length)];
+                cf.arpIndex++;
+                break;
+            case 'updown':
+                note = notes[cf.arpIndex % notes.length];
+                cf.arpIndex += cf.arpDirection;
+                if (cf.arpIndex >= notes.length - 1) cf.arpDirection = -1;
+                if (cf.arpIndex <= 0) cf.arpDirection = 1;
+                break;
+            case 'random':
+                note = notes[Math.floor(Math.random() * notes.length)];
+                break;
+        }
+
+        if (note !== undefined) {
+            cf.rhodes.noteOn(note, cfGetVelocity(cf));
+            cf.arpLastNote = note;
+        }
+    }, rateMs);
+}
+
+function cfBuildArpNotes(voiced) {
+    // Spread chord tones across 2 octaves, sorted low to high
+    const base = [...voiced].sort((a, b) => a - b);
+    const extended = [...base, ...base.map(n => n + 12)];
+    return extended;
+}
+
+function initChordFieldRhodes() {
+    if (chordFieldState.rhodes) return;
+    if (window.audioEngine && window.audioEngine.audioContext) {
+        chordFieldState.rhodes = new RhodesSynth(window.audioEngine.audioContext);
+        chordFieldState.rhodes.init();
+        console.log('[ChordField] Rhodes synth initialized');
+    } else if (window.audioEngine) {
+        window.audioEngine.init();
+        if (window.audioEngine.audioContext) {
+            chordFieldState.rhodes = new RhodesSynth(window.audioEngine.audioContext);
+            chordFieldState.rhodes.init();
+            console.log('[ChordField] Rhodes synth initialized (after audio init)');
+        }
+    }
+}
+
+// Get the grid info for a given row/col
+function cfGetPadInfo(row, col) {
+    const cf = chordFieldState;
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    const scale = ChordFieldEngine.MODES[modeName];
+
+    // Columns 0-6 = scale degrees, column 7 = chromatic (tritone sub / bII)
+    let root, quality;
+    if (col < 7) {
+        // Apply root rotation (circle of 4ths)
+        const degreeIdx = (col + cf.rootRotation) % 7;
+        root = (cf.key + scale[degreeIdx]) % 12;
+        quality = ChordFieldEngine.getQualityForDegree(modeName, degreeIdx, row);
+    } else {
+        // Column 7: chromatic — bII (tritone sub root = key + 1 semitone)
+        root = (cf.key + 1) % 12;
+        quality = ChordFieldEngine.getQualityForDegree(modeName, 0, row); // use I quality
+    }
+
+    return { root, quality, modeName };
+}
+
+function handleChordFieldPadPress(row, col) {
+    const cf = chordFieldState;
+    if (!cf.rhodes) {
+        initChordFieldRhodes();
+        if (!cf.rhodes) return;
+    }
+
+    const { root, quality } = cfGetPadInfo(row, col);
+
+    // Voice the chord
+    const voicingType = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex];
+    const voiced = ChordFieldEngine.voiceChord(root, quality, voicingType, cf.prevVoicing, cf.octaveOffset);
+
+    if (!voiced || voiced.length === 0) return;
+
+    // Stop any running rhythm/arp AND release all sounding notes
+    cfStopPlayback(cf);
+
+    // Store new chord
+    cf.activeNotes = voiced;
+
+    // Play chord with humanization (velocity + roll/strum)
+    if (cf.arpMode !== 'off') {
+        // Arp mode: play initial chord strike, then start arpeggiator
+        cfPlayChordHumanized(cf, voiced);
+        cf.arpNotes = cfBuildArpNotes(voiced);
+        cf.arpIndex = 0;
+        cf.arpDirection = 1;
+        // Start arp after a beat (let chord ring first)
+        const beatMs = 60000 / state.bpm;
+        setTimeout(() => {
+            // Release the chord, arp will take over
+            voiced.forEach(n => cf.rhodes.noteOff(n));
+            cfStartArp(cf);
+        }, beatMs);
+    } else {
+        // Normal chord play
+        cfPlayChordHumanized(cf, voiced);
+
+        // Start rhythm pattern if not sustain
+        if (cf.rhythmPattern > 0) {
+            cfStartRhythm(cf);
+        } else {
+            // Auto-release after 1.5s (sustain feel)
+            setTimeout(() => {
+                voiced.forEach(n => cf.rhodes.noteOff(n));
+                if (cf.activeNotes === voiced) cf.activeNotes = [];
+            }, 1500);
+        }
+    }
+
+    // Update state for voice leading
+    cf.prevVoicing = voiced;
+    cf.activePadRow = row;
+    cf.activePadCol = col;
+
+    // Compute glow for next press
+    const pitchClasses = voiced.map(n => n % 12);
+    cf.glowGrid = ChordFieldEngine.computeGlowGrid(
+        pitchClasses, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex], null
+    );
+
+    // Update display label
+    const rootName = CF_NOTE_NAMES[root];
+    cf.lastChordLabel = `${rootName}${ChordFieldEngine.getQualitySuffix(quality)}`;
+
+    updateChordFieldUI();
+    renderGrid();  // renderGrid calls updateLaunchpadLEDs internally
+}
+
+function renderChordFieldPad(pad, row, col) {
+    const cf = chordFieldState;
+    const { root, quality } = cfGetPadInfo(row, col);
+
+    // Get glow level
+    let glowLevel = 0;
+    if (cf.glowGrid) {
+        glowLevel = cf.glowGrid[row * 8 + col] || 0;
+    }
+
+    const isActive = (cf.activePadRow === row && cf.activePadCol === col);
+    const hasGlow = cf.glowGrid !== null;
+
+    // Color from glow level (or uniform base before first press)
+    const bgColor = hasGlow ? CF_GLOW_CSS[glowLevel] : CF_BASE_COLOR;
+    const borderColor = hasGlow ? CF_GLOW_BORDER[glowLevel] : CF_BASE_BORDER;
+
+    // Build CSS
+    pad.style.background = bgColor;
+    pad.style.opacity = isActive ? 1.0 : (hasGlow ? CF_GLOW_OPACITY[glowLevel] : 0.7);
+    pad.style.transition = 'all 0.15s ease';
+
+    // Show chord label
+    const rootName = CF_NOTE_NAMES[root];
+    const suffix = ChordFieldEngine.getQualitySuffix(quality);
+    pad.textContent = rootName + suffix;
+    pad.style.fontSize = '9px';
+    pad.style.color = glowLevel >= 2 ? '#1a1a2e' : '#fff';
+
+    // Glow ring + active highlight
+    if (isActive) {
+        pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
+        pad.style.boxShadow = '0 0 18px rgba(255, 220, 100, 0.7), inset 0 0 8px rgba(255, 220, 100, 0.25)';
+    } else if (glowLevel === 3) {
+        pad.style.borderColor = CF_GLOW_BORDER[3];
+        pad.style.boxShadow = '0 0 14px rgba(255, 240, 180, 0.5)';
+    } else if (glowLevel === 2) {
+        pad.style.borderColor = CF_GLOW_BORDER[2];
+        pad.style.boxShadow = '0 0 8px rgba(180, 160, 60, 0.3)';
+    } else if (glowLevel === 1) {
+        pad.style.borderColor = borderColor;
+        pad.style.boxShadow = '0 0 3px rgba(80, 120, 160, 0.15)';
+    } else {
+        pad.style.borderColor = borderColor;
+        pad.style.boxShadow = 'none';
+    }
+}
+
+function renderChordFieldSideButtons() {
+    const container = document.getElementById('side-buttons');
+    const buttons = container.querySelectorAll('.side-btn');
+    const cf = chordFieldState;
+
+    buttons.forEach((btn, i) => {
+        btn.className = 'side-btn';
+        const voicingName = ChordFieldEngine.VOICING_TYPES[i] || '—';
+        const isActive = i === cf.voicingIndex;
+
+        if (isActive) {
+            btn.classList.add('selected');
+            btn.style.background = 'var(--accent)';
+            btn.style.borderLeftColor = 'var(--accent)';
+            btn.style.color = 'var(--bg-primary)';
+        } else {
+            btn.style.background = '';
+            btn.style.borderLeftColor = 'rgba(120,130,150,0.3)';
+            btn.style.color = 'var(--text-secondary)';
+        }
+
+        // Capitalize first letter
+        btn.innerHTML = `<span>${voicingName.charAt(0).toUpperCase() + voicingName.slice(1)}</span>`;
+    });
+}
+
+function updateChordFieldUI() {
+    const cf = chordFieldState;
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    const keyName = CF_NOTE_NAMES[cf.key];
+
+    const keyLabel = document.getElementById('cf-key-label');
+    const modeLabel = document.getElementById('cf-mode-label');
+    const voicingLabel = document.getElementById('cf-voicing-label');
+    const chordLabel = document.getElementById('cf-chord-label');
+    const notesLabel = document.getElementById('cf-notes-label');
+
+    if (keyLabel) keyLabel.textContent = `${keyName} ${modeName.charAt(0).toUpperCase() + modeName.slice(1)}`;
+    if (modeLabel) modeLabel.textContent = modeName.charAt(0).toUpperCase() + modeName.slice(1);
+    if (voicingLabel) voicingLabel.textContent = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex];
+    if (chordLabel) chordLabel.textContent = cf.lastChordLabel || '—';
+    if (notesLabel) {
+        notesLabel.textContent = cf.activeNotes.length > 0
+            ? cf.activeNotes.map(n => ChordFieldEngine.midiToNoteName(n)).join(' ')
+            : '';
+    }
+
+    renderChordFieldSideButtons();
+}
+
+function handleChordFieldCC(buttonIdx) {
+    const cf = chordFieldState;
+    switch (buttonIdx) {
+        case 0: // Up — octave up
+            cf.octaveOffset = Math.min(2, cf.octaveOffset + 1);
+            console.log(`[ChordField] Octave offset: ${cf.octaveOffset}`);
+            break;
+        case 1: // Down — octave down
+            cf.octaveOffset = Math.max(-2, cf.octaveOffset - 1);
+            console.log(`[ChordField] Octave offset: ${cf.octaveOffset}`);
+            break;
+        case 2: // Left — key down (semitone)
+            cf.key = (cf.key + 11) % 12;
+            cf.prevVoicing = null; // reset voice leading on key change
+            cf.glowGrid = null;
+            console.log(`[ChordField] Key: ${CF_NOTE_NAMES[cf.key]}`);
+            break;
+        case 3: // Right — key up (semitone)
+            cf.key = (cf.key + 1) % 12;
+            cf.prevVoicing = null;
+            cf.glowGrid = null;
+            console.log(`[ChordField] Key: ${CF_NOTE_NAMES[cf.key]}`);
+            break;
+        case 4: // Session — toggle mode (back to seq)
+            setMode('seq');
+            return;
+        case 5: // User 1 — brighter mode
+            cf.modeIndex = Math.max(0, cf.modeIndex - 1);
+            cf.prevVoicing = null;
+            cf.glowGrid = null;
+            console.log(`[ChordField] Mode: ${ChordFieldEngine.MODE_ORDER[cf.modeIndex]}`);
+            break;
+        case 6: // User 2 — darker mode
+            cf.modeIndex = Math.min(6, cf.modeIndex + 1);
+            cf.prevVoicing = null;
+            cf.glowGrid = null;
+            console.log(`[ChordField] Mode: ${ChordFieldEngine.MODE_ORDER[cf.modeIndex]}`);
+            break;
+        case 7: // Mixer — root rotation (circle of 4ths)
+            cf.rootRotation = (cf.rootRotation + 1) % 7;
+            cf.glowGrid = null;
+            console.log(`[ChordField] Root rotation: ${cf.rootRotation}`);
+            break;
+    }
+    updateChordFieldUI();
+    renderGrid();
+}
+
+function handleChordFieldSideButton(index) {
+    if (index < ChordFieldEngine.VOICING_TYPES.length) {
+        chordFieldState.voicingIndex = index;
+        console.log(`[ChordField] Voicing: ${ChordFieldEngine.VOICING_TYPES[index]}`);
+        updateChordFieldUI();
+    }
+}
+
+function getChordFieldLPColor(digitalRow, digitalCol) {
+    const cf = chordFieldState;
+
+    // Active pad: bright white
+    if (cf.activePadRow === digitalRow && cf.activePadCol === digitalCol) {
+        return LP_COLOR.WHITE;
+    }
+
+    // Before first press, show uniform base color
+    if (!cf.glowGrid) return CF_LP_BASE_COLOR;
+
+    // With glow grid, use tiered brightness
+    const glow = cf.glowGrid[digitalRow * 8 + digitalCol] || 0;
+    return CF_LP_GLOW_COLORS[Math.min(glow, 3)];
+}
+
+function getChordFieldSideLPColor(index) {
+    return index === chordFieldState.voicingIndex ? LP_COLOR.WHITE : LP_COLOR.WHITE_DIM;
+}
+
+function setupChordFieldListeners() {
+    // Key controls
+    const cfKeyDown = document.getElementById('cf-key-down');
+    const cfKeyUp = document.getElementById('cf-key-up');
+    const cfModeDown = document.getElementById('cf-mode-down');
+    const cfModeUp = document.getElementById('cf-mode-up');
+
+    if (cfKeyDown) cfKeyDown.addEventListener('click', () => {
+        chordFieldState.key = (chordFieldState.key + 11) % 12;
+        chordFieldState.prevVoicing = null;
+        chordFieldState.glowGrid = null;
+        cfStopPlayback(chordFieldState);
+        updateChordFieldUI();
+        renderGrid();
+    });
+    if (cfKeyUp) cfKeyUp.addEventListener('click', () => {
+        chordFieldState.key = (chordFieldState.key + 1) % 12;
+        chordFieldState.prevVoicing = null;
+        chordFieldState.glowGrid = null;
+        cfStopPlayback(chordFieldState);
+        updateChordFieldUI();
+        renderGrid();
+    });
+    if (cfModeDown) cfModeDown.addEventListener('click', () => {
+        chordFieldState.modeIndex = Math.min(6, chordFieldState.modeIndex + 1);
+        chordFieldState.prevVoicing = null;
+        chordFieldState.glowGrid = null;
+        cfStopPlayback(chordFieldState);
+        updateChordFieldUI();
+        renderGrid();
+    });
+    if (cfModeUp) cfModeUp.addEventListener('click', () => {
+        chordFieldState.modeIndex = Math.max(0, chordFieldState.modeIndex - 1);
+        chordFieldState.prevVoicing = null;
+        chordFieldState.glowGrid = null;
+        cfStopPlayback(chordFieldState);
+        updateChordFieldUI();
+        renderGrid();
+    });
+
+    // ── Humanization Controls ──
+
+    const cfVelocityBtn = document.getElementById('cf-velocity-toggle');
+    const cfRollBtn = document.getElementById('cf-roll-cycle');
+    const cfRhythmBtn = document.getElementById('cf-rhythm-cycle');
+    const cfArpBtn = document.getElementById('cf-arp-cycle');
+    const cfArpRateBtn = document.getElementById('cf-arp-rate');
+
+    if (cfVelocityBtn) cfVelocityBtn.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cf.velocityMode = cf.velocityMode === 'fixed' ? 'humanize' : 'fixed';
+        cfVelocityBtn.textContent = cf.velocityMode === 'humanize' ? '🎯 Humanize' : '🎯 Fixed';
+        cfVelocityBtn.classList.toggle('active', cf.velocityMode === 'humanize');
+    });
+
+    if (cfRollBtn) cfRollBtn.addEventListener('click', () => {
+        const cf = chordFieldState;
+        const modes = ['off', 'roll', 'strum'];
+        const labels = ['✋ Off', '🌊 Roll', '🎸 Strum'];
+        const idx = (modes.indexOf(cf.rollMode) + 1) % modes.length;
+        cf.rollMode = modes[idx];
+        cfRollBtn.textContent = labels[idx];
+        cfRollBtn.classList.toggle('active', cf.rollMode !== 'off');
+    });
+
+    if (cfRhythmBtn) cfRhythmBtn.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cfStopPlayback(cf);
+        cf.rhythmPattern = (cf.rhythmPattern + 1) % CF_RHYTHM_PATTERNS.length;
+        const name = CF_RHYTHM_PATTERNS[cf.rhythmPattern].name;
+        cfRhythmBtn.textContent = '🥁 ' + name;
+        cfRhythmBtn.classList.toggle('active', cf.rhythmPattern > 0);
+    });
+
+    if (cfArpBtn) cfArpBtn.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cfStopPlayback(cf);
+        const idx = (CF_ARP_MODES.indexOf(cf.arpMode) + 1) % CF_ARP_MODES.length;
+        cf.arpMode = CF_ARP_MODES[idx];
+        const label = cf.arpMode === 'off' ? 'Arp Off' : 'Arp ' + cf.arpMode.charAt(0).toUpperCase() + cf.arpMode.slice(1);
+        cfArpBtn.textContent = '🎹 ' + label;
+        cfArpBtn.classList.toggle('active', cf.arpMode !== 'off');
+        // Show/hide rate button
+        if (cfArpRateBtn) cfArpRateBtn.style.display = cf.arpMode !== 'off' ? '' : 'none';
+    });
+
+    if (cfArpRateBtn) cfArpRateBtn.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cfStopPlayback(cf);
+        const idx = (CF_ARP_RATES.indexOf(cf.arpRate) + 1) % CF_ARP_RATES.length;
+        cf.arpRate = CF_ARP_RATES[idx];
+        cfArpRateBtn.textContent = '♪ ' + cf.arpRate;
+    });
+}
+
+// Web CSS colors for ADSR
+const ADSR_CSS_COLORS = {
+    attack: { bright: '#ffaa33', dim: '#553311' },
+    decay: { bright: '#ff6633', dim: '#551a11' },
+    sustain: { bright: '#33ff88', dim: '#114422' },
+    release: { bright: '#3388ff', dim: '#112244' },
+};
+
+// ── Web Grid Rendering ──
+
+function renderSampleEditPad(pad, row, col) {
+    const trackIndex = state.currentTrack;
+    const trackColor = TRACK_COLORS[trackIndex] || '#00e8a0';
+    const trackColorDim = TRACK_COLORS_DIM[trackIndex] || '#004430';
+    const hasSample = window.audioEngine && window.audioEngine.hasSample(trackIndex);
+
+    if (row <= 4) {
+        // ── Waveform rows ──
+        if (!hasSample) {
+            pad.style.background = 'rgba(15, 15, 25, 0.6)';
+            pad.style.borderColor = 'rgba(255, 255, 255, 0.05)';
+            if (row === 2 && col === 3) pad.textContent = 'NO';
+            if (row === 2 && col === 4) pad.textContent = 'SMP';
+            return;
+        }
+
+        const amps = getSampleAmplitudes(trackIndex);
+        if (!amps) { pad.style.background = 'rgba(15, 15, 25, 0.4)'; return; }
+
+        const sample = window.audioEngine.trackSamples[trackIndex];
+        const colNorm = col / 8; // normalized position (0-1) for this column
+        const colNormEnd = (col + 1) / 8;
+        const inActive = colNorm >= sample.startOffset && colNormEnd <= sample.endOffset + 0.001;
+        const isInCol = Math.floor(sample.startOffset * 8) === col;
+        const isOutCol = Math.min(7, Math.floor(sample.endOffset * 8 - 0.001)) === col;
+
+        // How many rows should be lit (from bottom=row4 up)
+        const barHeight = Math.round(amps[col] * 5); // 0-5
+        const rowFromBottom = 4 - row; // row4=0, row3=1, row2=2, row1=3, row0=4
+
+        if (rowFromBottom < barHeight) {
+            // Lit pad
+            if (isInCol && row === 4) {
+                pad.style.background = '#ff4444';
+                pad.style.boxShadow = '0 0 12px rgba(255, 68, 68, 0.6)';
+            } else if (isOutCol && row === 4) {
+                pad.style.background = '#4488ff';
+                pad.style.boxShadow = '0 0 12px rgba(68, 136, 255, 0.6)';
+            } else if (inActive) {
+                const brightness = 0.5 + (rowFromBottom / 5) * 0.5;
+                pad.style.background = trackColor;
+                pad.style.opacity = brightness;
+                pad.style.boxShadow = `0 0 8px ${trackColor}40`;
+            } else {
+                pad.style.background = trackColorDim;
+                pad.style.opacity = '0.3';
+            }
+            pad.style.borderColor = inActive ? `${trackColor}60` : 'rgba(255,255,255,0.05)';
+        } else {
+            // Unlit pad
+            pad.style.background = inActive ? `${trackColor}10` : 'rgba(10, 10, 20, 0.5)';
+            pad.style.borderColor = 'rgba(255, 255, 255, 0.03)';
+            // Show IN/OUT markers even on unlit base row
+            if (row === 4) {
+                if (isInCol) {
+                    pad.style.background = '#ff444430';
+                    pad.style.borderColor = '#ff444460';
+                } else if (isOutCol) {
+                    pad.style.background = '#4488ff30';
+                    pad.style.borderColor = '#4488ff60';
+                }
+            }
+        }
+
+    } else if (row === 5) {
+        // ── ADSR curve row ──
+        if (!hasSample) { pad.style.background = 'rgba(15, 15, 25, 0.4)'; return; }
+        const curve = getADSRCurveValues(trackIndex);
+        const height = curve[col];
+        const brightness = 0.15 + height * 0.85;
+        pad.style.background = trackColor;
+        pad.style.opacity = brightness;
+        pad.style.borderColor = `${trackColor}40`;
+        pad.style.boxShadow = height > 0.5 ? `0 0 6px ${trackColor}30` : 'none';
+
+        // Label the ADSR phases
+        const adsr = hasSample ? window.audioEngine.trackSamples[trackIndex].adsr : null;
+        if (adsr) {
+            const total = adsr.attack + adsr.decay + 0.2 + adsr.release;
+            const t = (col / 7) * total;
+            if (t <= adsr.attack) pad.textContent = '';
+            else if (t <= adsr.attack + adsr.decay) pad.textContent = '';
+        }
+
+    } else if (row === 6) {
+        // ── ADSR parameter controls ──
+        const paramIdx = Math.floor(col / 2);
+        const param = ADSR_PARAM_ORDER[paramIdx];
+        const isSelected = sampleEditState.selectedParam === param;
+        const isDecrease = col % 2 === 0;
+        const colors = ADSR_CSS_COLORS[param];
+
+        pad.style.background = isSelected ? colors.bright : colors.dim;
+        pad.style.borderColor = isSelected ? `${colors.bright}80` : 'rgba(255,255,255,0.08)';
+        pad.style.boxShadow = isSelected ? `0 0 12px ${colors.bright}40` : 'none';
+        pad.textContent = isDecrease ? '−' : '+';
+        pad.style.color = isSelected ? '#000' : 'rgba(255,255,255,0.5)';
+        pad.style.fontSize = '14px';
+        pad.style.fontWeight = 'bold';
+
+    } else if (row === 7) {
+        // ── Bottom row: LS and RS handled globally, middle = preview ──
+        if (col >= 3 && col <= 4) {
+            pad.style.background = hasSample ? `${trackColor}60` : 'rgba(30,30,50,0.5)';
+            pad.style.borderColor = `${trackColor}30`;
+            pad.textContent = '▶';
+            pad.style.fontSize = '12px';
+        }
+    }
+}
+
+// ── Sample Mode Click Handler ──
+
+function handleSamplePadPress(row, col) {
+    const trackIndex = state.currentTrack;
+    const hasSample = window.audioEngine && window.audioEngine.hasSample(trackIndex);
+    if (!hasSample && row <= 5) return;
+
+    if (row <= 4) {
+        // ── Waveform tap: move nearest IN or OUT marker ──
+        const sample = window.audioEngine.trackSamples[trackIndex];
+        const tapPos = (col + 0.5) / 8; // center of this column (0-1)
+
+        const distToStart = Math.abs(tapPos - sample.startOffset);
+        const distToEnd = Math.abs(tapPos - sample.endOffset);
+
+        if (distToStart <= distToEnd) {
+            // Move IN marker (snap to column boundary)
+            const newStart = col / 8;
+            if (newStart < sample.endOffset) {
+                window.audioEngine.setStartOffset(trackIndex, newStart);
+            }
+        } else {
+            // Move OUT marker
+            const newEnd = (col + 1) / 8;
+            if (newEnd > sample.startOffset) {
+                window.audioEngine.setEndOffset(trackIndex, newEnd);
+            }
+        }
+
+        drawEditorWaveform(); // sync the web editor panel
+        renderGrid();
+
+    } else if (row === 5) {
+        // ── ADSR curve tap: could audition with envelope ──
+        // For now, just preview
+        if (hasSample) {
+            window.audioEngine.playSample(trackIndex, 127);
+        }
+
+    } else if (row === 6) {
+        // ── ADSR parameter adjust ──
+        const paramIdx = Math.floor(col / 2);
+        const param = ADSR_PARAM_ORDER[paramIdx];
+        const isDecrease = col % 2 === 0;
+        sampleEditState.selectedParam = param;
+
+        const adsr = window.audioEngine.trackSamples[trackIndex].adsr;
+
+        // Step sizes
+        const steps = { attack: 0.02, decay: 0.02, sustain: 0.05, release: 0.02 };
+        const maxes = { attack: 2.0, decay: 2.0, sustain: 1.0, release: 3.0 };
+        const mins = { attack: 0.001, decay: 0.001, sustain: 0.0, release: 0.001 };
+
+        if (isDecrease) {
+            adsr[param] = Math.max(mins[param], adsr[param] - steps[param]);
+        } else {
+            adsr[param] = Math.min(maxes[param], adsr[param] + steps[param]);
+        }
+
+        // Sync to web editor sliders
+        updateADSRSliders();
+        drawADSRVisualizer();
+        renderGrid();
+
+    } else if (row === 7 && (col === 3 || col === 4)) {
+        // ── Preview button ──
+        if (hasSample) {
+            window.audioEngine.playSample(trackIndex, 127);
+        }
+    }
+}
+
+// ── LP Color for Sample Mode ──
+
+function getSampleEditLPColor(row, col, trackIndex) {
+    const trackColor = LP_TRACK_COLORS[trackIndex % LP_TRACK_COLORS.length];
+    const hasSample = window.audioEngine && window.audioEngine.hasSample(trackIndex);
+
+    if (row <= 4) {
+        // Waveform
+        if (!hasSample) return LP_COLOR.OFF;
+        const amps = getSampleAmplitudes(trackIndex);
+        if (!amps) return LP_COLOR.OFF;
+
+        const sample = window.audioEngine.trackSamples[trackIndex];
+        const colNorm = col / 8;
+        const colNormEnd = (col + 1) / 8;
+        const inActive = colNorm >= sample.startOffset && colNormEnd <= sample.endOffset + 0.001;
+        const isInCol = Math.floor(sample.startOffset * 8) === col;
+        const isOutCol = Math.min(7, Math.floor(sample.endOffset * 8 - 0.001)) === col;
+
+        const barHeight = Math.round(amps[col] * 5);
+        const rowFromBottom = 4 - row;
+
+        if (rowFromBottom < barHeight) {
+            // Lit
+            if (isInCol && row === 4) return 5;  // red
+            if (isOutCol && row === 4) return 45; // blue
+            if (inActive) return trackColor;
+            return LP_COLOR.WHITE_DIM;
+        } else {
+            // Unlit
+            if (row === 4 && isInCol) return 7;   // dim red
+            if (row === 4 && isOutCol) return 47;  // dim blue
+            return LP_COLOR.OFF;
+        }
+
+    } else if (row === 5) {
+        // ADSR curve
+        if (!hasSample) return LP_COLOR.OFF;
+        const curve = getADSRCurveValues(trackIndex);
+        const height = curve[col];
+        // Map height to brightness: use track color if high, dim if low
+        if (height > 0.7) return trackColor;
+        if (height > 0.4) return LP_COLOR.WARM_WHITE;
+        if (height > 0.15) return LP_COLOR.WHITE_DIM;
+        return LP_COLOR.OFF;
+
+    } else if (row === 6) {
+        // ADSR params
+        const paramIdx = Math.floor(col / 2);
+        const param = ADSR_PARAM_ORDER[paramIdx];
+        const isSelected = sampleEditState.selectedParam === param;
+        const colors = ADSR_COLORS[param];
+        return isSelected ? colors.bright : colors.dim;
+
+    } else if (row === 7) {
+        if (col === 3 || col === 4) return hasSample ? trackColor : LP_COLOR.OFF;
+        return LP_COLOR.OFF;
+    }
+
+    return LP_COLOR.OFF;
+}
+
+// ──────────────────────────────────────────────
+// SAMPLE EDITOR (Web Panel)
+// ──────────────────────────────────────────────
+
+function drawEditorWaveform() {
+    const canvas = document.getElementById('editor-waveform');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = 80 * window.devicePixelRatio;
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    const width = rect.width;
+    const height = 80;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const trackIndex = state.currentTrack;
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) {
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.font = '11px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No sample loaded', width / 2, height / 2 + 4);
+        return;
+    }
+
+    const sample = window.audioEngine.trackSamples[trackIndex];
+    const data = sample.waveformData;
+    if (!data) return;
+
+    const trackColor = window.TRACK_COLORS ? window.TRACK_COLORS[trackIndex] : '#00e8a0';
+    const startX = sample.startOffset * width;
+    const endX = sample.endOffset * width;
+
+    // Dimmed background
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(0, 0, width, height);
+
+    // Active region background
+    ctx.fillStyle = `${trackColor}15`;
+    ctx.fillRect(startX, 0, endX - startX, height);
+
+    // Draw waveform bars
+    const barWidth = width / data.length;
+    for (let i = 0; i < data.length; i++) {
+        const x = i * barWidth;
+        const barH = data[i] * height * 0.85;
+        const y = (height - barH) / 2;
+        const normalized = i / data.length;
+
+        if (normalized < sample.startOffset || normalized > sample.endOffset) {
+            ctx.globalAlpha = 0.12;
+        } else {
+            ctx.globalAlpha = 0.7;
+        }
+        ctx.fillStyle = trackColor;
+        ctx.fillRect(x + 0.5, y, Math.max(barWidth - 1, 1), barH);
+    }
+    ctx.globalAlpha = 1;
+
+    // Start marker
+    ctx.strokeStyle = '#ff4444';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(startX, 0);
+    ctx.lineTo(startX, height);
+    ctx.stroke();
+
+    // Start handle triangle
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.moveTo(startX, 0);
+    ctx.lineTo(startX + 8, 0);
+    ctx.lineTo(startX, 10);
+    ctx.closePath();
+    ctx.fill();
+
+    // End marker
+    ctx.strokeStyle = '#44aaff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(endX, 0);
+    ctx.lineTo(endX, height);
+    ctx.stroke();
+
+    // End handle triangle
+    ctx.fillStyle = '#44aaff';
+    ctx.beginPath();
+    ctx.moveTo(endX, 0);
+    ctx.lineTo(endX - 8, 0);
+    ctx.lineTo(endX, 10);
+    ctx.closePath();
+    ctx.fill();
+
+    // Update time labels
+    const duration = sample.buffer ? sample.buffer.duration : 0;
+    const startLabel = document.getElementById('editor-start-time');
+    const endLabel = document.getElementById('editor-end-time');
+    if (startLabel) startLabel.textContent = `IN: ${(sample.startOffset * duration).toFixed(3)}s`;
+    if (endLabel) endLabel.textContent = `OUT: ${(sample.endOffset * duration).toFixed(3)}s`;
+}
+
+function setupEditorWaveformDrag() {
+    const canvas = document.getElementById('editor-waveform');
+    if (!canvas) return;
+
+    let dragging = null; // 'start' | 'end' | null
+
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / rect.width;
+        const trackIndex = state.currentTrack;
+        if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return;
+        const sample = window.audioEngine.trackSamples[trackIndex];
+
+        // Detect proximity to start or end marker (within 3% of width)
+        const startDist = Math.abs(x - sample.startOffset);
+        const endDist = Math.abs(x - sample.endOffset);
+
+        if (startDist < 0.03 || (startDist < endDist && x < (sample.startOffset + sample.endOffset) / 2)) {
+            dragging = 'start';
+        } else {
+            dragging = 'end';
+        }
+
+        updateMarker(e);
+    });
+
+    function updateMarker(e) {
+        const rect = canvas.getBoundingClientRect();
+        const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const trackIndex = state.currentTrack;
+        if (!window.audioEngine) return;
+
+        if (dragging === 'start') {
+            window.audioEngine.setStartOffset(trackIndex, x);
+        } else if (dragging === 'end') {
+            window.audioEngine.setEndOffset(trackIndex, x);
+        }
+        drawEditorWaveform();
+    }
+
+    document.addEventListener('mousemove', (e) => {
+        if (dragging) updateMarker(e);
+    });
+
+    document.addEventListener('mouseup', () => {
+        dragging = null;
+    });
+}
+
+function drawADSRVisualizer() {
+    const canvas = document.getElementById('adsr-visualizer');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : { width: 240 };
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = 50 * window.devicePixelRatio;
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    const width = rect.width;
+    const height = 50;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const trackIndex = state.currentTrack;
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return;
+
+    const sample = window.audioEngine.trackSamples[trackIndex];
+    const adsr = sample.adsr;
+    const trackColor = window.TRACK_COLORS ? window.TRACK_COLORS[trackIndex] : '#00e8a0';
+
+    // Normalize to fit canvas
+    const totalTime = adsr.attack + adsr.decay + 0.2 + adsr.release; // 0.2 = sustain hold
+    const pad = 4;
+    const drawW = width - pad * 2;
+    const drawH = height - pad * 2;
+
+    const aX = pad + (adsr.attack / totalTime) * drawW;
+    const dX = aX + (adsr.decay / totalTime) * drawW;
+    const sX = dX + (0.2 / totalTime) * drawW;
+    const rX = sX + (adsr.release / totalTime) * drawW;
+
+    // Fill under curve
+    ctx.beginPath();
+    ctx.moveTo(pad, height - pad);
+    ctx.lineTo(aX, pad);                              // Attack
+    ctx.lineTo(dX, pad + drawH * (1 - adsr.sustain)); // Decay to sustain
+    ctx.lineTo(sX, pad + drawH * (1 - adsr.sustain)); // Sustain hold
+    ctx.lineTo(rX, height - pad);                      // Release
+    ctx.lineTo(pad, height - pad);
+    ctx.closePath();
+
+    const grad = ctx.createLinearGradient(0, 0, 0, height);
+    grad.addColorStop(0, `${trackColor}40`);
+    grad.addColorStop(1, `${trackColor}05`);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Draw curve
+    ctx.beginPath();
+    ctx.moveTo(pad, height - pad);
+    ctx.lineTo(aX, pad);
+    ctx.lineTo(dX, pad + drawH * (1 - adsr.sustain));
+    ctx.lineTo(sX, pad + drawH * (1 - adsr.sustain));
+    ctx.lineTo(rX, height - pad);
+    ctx.strokeStyle = trackColor;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Dots at inflection points
+    [
+        [pad, height - pad],
+        [aX, pad],
+        [dX, pad + drawH * (1 - adsr.sustain)],
+        [sX, pad + drawH * (1 - adsr.sustain)],
+        [rX, height - pad],
+    ].forEach(([x, y]) => {
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = trackColor;
+        ctx.fill();
+    });
+
+    // Labels
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '8px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('A', (pad + aX) / 2, height - 2);
+    ctx.fillText('D', (aX + dX) / 2, height - 2);
+    ctx.fillText('S', (dX + sX) / 2, height - 2);
+    ctx.fillText('R', (sX + rX) / 2, height - 2);
+}
+
+function updateSampleEditor() {
+    drawEditorWaveform();
+    drawADSRVisualizer();
+    updateADSRSliders();
+}
+
+function updateADSRSliders() {
+    const trackIndex = state.currentTrack;
+    if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return;
+    const adsr = window.audioEngine.trackSamples[trackIndex].adsr;
+
+    const attackEl = document.getElementById('adsr-attack');
+    const decayEl = document.getElementById('adsr-decay');
+    const sustainEl = document.getElementById('adsr-sustain');
+    const releaseEl = document.getElementById('adsr-release');
+
+    if (attackEl) attackEl.value = adsr.attack * 1000;
+    if (decayEl) decayEl.value = adsr.decay * 1000;
+    if (sustainEl) sustainEl.value = adsr.sustain * 100;
+    if (releaseEl) releaseEl.value = adsr.release * 1000;
+
+    updateADSRLabels();
+}
+
+function updateADSRLabels() {
+    const attackEl = document.getElementById('adsr-attack');
+    const decayEl = document.getElementById('adsr-decay');
+    const sustainEl = document.getElementById('adsr-sustain');
+    const releaseEl = document.getElementById('adsr-release');
+
+    const fmt = (ms) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+    if (attackEl) document.getElementById('adsr-attack-val').textContent = fmt(attackEl.value);
+    if (decayEl) document.getElementById('adsr-decay-val').textContent = fmt(decayEl.value);
+    if (sustainEl) document.getElementById('adsr-sustain-val').textContent = `${Math.round(sustainEl.value)}%`;
+    if (releaseEl) document.getElementById('adsr-release-val').textContent = fmt(releaseEl.value);
+}
+
+function setupSampleEditorListeners() {
+    // Toggle panel
+    const toggleBtn = document.getElementById('btn-sample-editor-toggle');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+            const editor = document.getElementById('sample-editor');
+            editor.classList.toggle('collapsed');
+            if (!editor.classList.contains('collapsed')) {
+                updateSampleEditor();
+            }
+        });
+    }
+
+    // ADSR sliders
+    ['attack', 'decay', 'sustain', 'release'].forEach(param => {
+        const el = document.getElementById(`adsr-${param}`);
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const trackIndex = state.currentTrack;
+            if (!window.audioEngine || !window.audioEngine.hasSample(trackIndex)) return;
+            const adsr = window.audioEngine.trackSamples[trackIndex].adsr;
+
+            if (param === 'sustain') {
+                adsr.sustain = el.value / 100;
+            } else {
+                adsr[param] = el.value / 1000; // ms → seconds
+            }
+            updateADSRLabels();
+            drawADSRVisualizer();
+        });
+    });
+
+    // Waveform drag for in/out points
+    setupEditorWaveformDrag();
+}
+
+// ──────────────────────────────────────────────
 // EVENT BINDINGS
 // ──────────────────────────────────────────────
 
 function setupEventListeners() {
+    // Global mouseup to cancel REC hold (erase) if mouse leaves pad
+    document.addEventListener('mouseup', () => {
+        if (state.recHeld) {
+            state.recHeld = false;
+            console.log('🔴 REC released (global) — erase stopped');
+        }
+    });
+
     // Transport
     document.getElementById('btn-play').addEventListener('click', togglePlay);
     document.getElementById('btn-stop').addEventListener('click', stop);
+
+    // Metronome
+    document.getElementById('btn-metronome').addEventListener('click', toggleMetronome);
 
     // BPM
     document.getElementById('bpm-input').addEventListener('change', (e) => {
@@ -2391,9 +4373,14 @@ function setupEventListeners() {
     document.getElementById('btn-mode-seq').addEventListener('click', () => setMode('seq'));
     document.getElementById('btn-mode-chords').addEventListener('click', () => setMode('chords'));
     document.getElementById('btn-mode-harmony').addEventListener('click', () => setMode('harmony'));
+    document.getElementById('btn-mode-sample').addEventListener('click', () => setMode('sample'));
+    document.getElementById('btn-mode-chordfield').addEventListener('click', () => setMode('chordfield'));
 
     // Harmony controls
     setupHarmonyListeners();
+
+    // Chord Field controls
+    setupChordFieldListeners();
 
     // Scene buttons
     document.querySelectorAll('.scene-btn').forEach(btn => {
@@ -2635,6 +4622,7 @@ function init() {
     buildSideButtons();
     renderAll();
     setupEventListeners();
+    setupSampleEditorListeners();
     initMidi();
 
     // Initialize audio engine reference
