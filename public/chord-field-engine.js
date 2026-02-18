@@ -307,6 +307,28 @@
                 notes = voiceClose(root, intervals, prevVoicing);
         }
 
+        // ── Centroid gravity correction ──
+        // Prevents voice leading drift when circling through keys.
+        // If the chord's average pitch drifts outside the sweet zone,
+        // shift the ENTIRE voicing by octave(s) to pull it back.
+        const GRAVITY_LOW = 46;  // Bb2 — below this, push up
+        const GRAVITY_HIGH = 70;  // Bb4 — above this, push down
+        const GRAVITY_TARGET = DEFAULT_CENTER; // F#3 = 54
+
+        if (notes.length > 0) {
+            const centroid = notes.reduce((a, b) => a + b, 0) / notes.length;
+
+            if (centroid < GRAVITY_LOW || centroid > GRAVITY_HIGH) {
+                // Calculate how many octaves to shift to get closest to target
+                const drift = GRAVITY_TARGET - centroid;
+                const octaveShift = Math.round(drift / 12) * 12;
+
+                if (octaveShift !== 0) {
+                    notes = notes.map(n => n + octaveShift);
+                }
+            }
+        }
+
         // Apply octave offset
         if (octaveOffset && octaveOffset !== 0) {
             notes = notes.map(n => n + (octaveOffset * 12));
