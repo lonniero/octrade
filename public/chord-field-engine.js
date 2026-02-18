@@ -853,6 +853,328 @@
     }
 
     // ──────────────────────────────────────────────
+    // RING CHORD FIELD — Circle of Fifths Layout
+    // ──────────────────────────────────────────────
+
+    // Circle of fifths: 12 pitch classes ordered by ascending 5ths
+    // C → G → D → A → E → B → F#/Gb → Db → Ab → Eb → Bb → F
+    const CIRCLE_OF_FIFTHS = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5];
+
+    // Reverse lookup: pitch class → index in circle
+    const CIRCLE_INDEX = {};
+    CIRCLE_OF_FIFTHS.forEach((pc, i) => CIRCLE_INDEX[pc] = i);
+
+    /**
+     * Get the diatonic degree index (0-6) of a pitch class in a given key/mode.
+     * Returns -1 if the pitch class is not diatonic.
+     */
+    function getDiatonicDegree(pitchClass, key, modeName) {
+        const scale = MODES[modeName] || MODES.ionian;
+        for (let i = 0; i < scale.length; i++) {
+            if ((key + scale[i]) % 12 === pitchClass % 12) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Get the default quality for a root in a key/mode.
+     * Uses 7th chord quality for richer sound.
+     */
+    function getDefaultQuality(root, key, modeName) {
+        const degree = getDiatonicDegree(root, key, modeName);
+        if (degree >= 0) {
+            const q7 = MODE_DEGREE_7THS[modeName];
+            if (q7) return q7[degree];
+            return MODE_DEGREE_TRIADS[modeName]?.[degree] || 'maj7';
+        }
+        // Non-diatonic root: default to dom7 (works for secondary doms, tritone subs)
+        return 'dom7';
+    }
+
+    /**
+     * Get the secondary dominant (V7) that resolves to a target root.
+     * The secondary dominant root is a perfect 5th above the target.
+     */
+    function getSecondaryDominant(targetRoot) {
+        const root = (targetRoot + 7) % 12; // P5 above = V of target
+        return { root, quality: 'dom7', type: 'secondary_dom', resolves_to: targetRoot };
+    }
+
+    /**
+     * Get the tritone substitution for a dominant chord.
+     * The tritone sub shares the same tritone (3rd & 7th) but from a root a tritone away.
+     */
+    function getTritoneSubstitution(dominantRoot) {
+        const root = (dominantRoot + 6) % 12; // tritone = 6 semitones
+        return { root, quality: 'dom7', type: 'tritone_sub' };
+    }
+
+    /**
+     * Get modal interchange chords (borrowed from parallel minor/modes).
+     * Returns chords from parallel minor that aren't in the current key.
+     */
+    function getModalInterchange(key, modeName) {
+        const chords = [];
+        // Borrow from aeolian (natural minor) if we're in a major mode
+        const borrowFrom = (modeName === 'ionian' || modeName === 'lydian' || modeName === 'mixolydian')
+            ? 'aeolian' : 'ionian';
+        const borrowScale = MODES[borrowFrom];
+        const currentScale = MODES[modeName];
+        const borrow7ths = MODE_DEGREE_7THS[borrowFrom];
+
+        for (let deg = 0; deg < 7; deg++) {
+            const borrowedInterval = borrowScale[deg];
+            const currentInterval = currentScale[deg];
+            // Only include if the root differs from current mode's degree
+            if (borrowedInterval !== currentInterval) {
+                const root = (key + borrowedInterval) % 12;
+                const quality = borrow7ths ? borrow7ths[deg] : 'maj7';
+                chords.push({ root, quality, type: 'modal_interchange', degree: deg });
+            }
+        }
+        return chords;
+    }
+
+    /**
+     * Get chromatic mediant chords.
+     * Chromatic mediants share 1-2 notes but are a 3rd away (major or minor 3rd).
+     */
+    function getChromaticMediants(root, quality) {
+        const mediants = [];
+        // Major 3rd up & down
+        mediants.push({ root: (root + 4) % 12, quality: 'maj7', type: 'chromatic_mediant' });
+        mediants.push({ root: (root + 8) % 12, quality: 'maj7', type: 'chromatic_mediant' });
+        // Minor 3rd up & down
+        mediants.push({ root: (root + 3) % 12, quality: 'maj7', type: 'chromatic_mediant' });
+        mediants.push({ root: (root + 9) % 12, quality: 'min7', type: 'chromatic_mediant' });
+        return mediants;
+    }
+
+    /**
+     * Compute the 3 "next move" suggestions for the center pads.
+     * Each has a different personality:
+     *   safe    = strongest diatonic resolution
+     *   color   = modal interchange or chromatic mediant
+     *   surprise = tritone substitution or distant secondary dominant
+     *
+     * @param {number} currentRoot - Current chord's root (0-11)
+     * @param {string} currentQuality - Current chord quality
+     * @param {number} key - Current key (0-11)
+     * @param {string} modeName - Current mode name
+     * @param {number[]} recentRoots - Array of recently played roots (for variety)
+     * @returns {{ safe: object, color: object, surprise: object }}
+     */
+    function computeSuggestions(currentRoot, currentQuality, key, modeName, recentRoots) {
+        const recent = recentRoots || [];
+        const scale = MODES[modeName] || MODES.ionian;
+        const degree7ths = MODE_DEGREE_7THS[modeName] || MODE_DEGREE_7THS.ionian;
+
+        // ── SAFE: strongest diatonic resolution ──
+        // Priority: V→I, then circle of fifths (down a 5th), then IV
+        let safe;
+        const currentDegree = getDiatonicDegree(currentRoot, key, modeName);
+
+        if (currentDegree === 4) {
+            // We're on V → resolve to I
+            safe = { root: key, quality: degree7ths[0], type: 'resolution' };
+        } else if (currentDegree === 1) {
+            // We're on ii → go to V
+            safe = { root: (key + scale[4]) % 12, quality: degree7ths[4], type: 'resolution' };
+        } else if (currentDegree === 0) {
+            // We're on I → suggest IV (subdominant direction for movement)
+            safe = { root: (key + scale[3]) % 12, quality: degree7ths[3], type: 'resolution' };
+        } else if (currentDegree >= 0) {
+            // Diatonic chord: resolve down a 5th in the scale (circle of 5ths motion)
+            const targetDeg = (currentDegree + 3) % 7; // down a 5th = up a 4th in scale
+            safe = { root: (key + scale[targetDeg]) % 12, quality: degree7ths[targetDeg], type: 'resolution' };
+        } else {
+            // Non-diatonic: resolve down a half step to nearest diatonic
+            for (let offset = 1; offset <= 6; offset++) {
+                const tryRoot = (currentRoot - offset + 12) % 12;
+                const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
+                if (tryDeg >= 0) {
+                    safe = { root: tryRoot, quality: degree7ths[tryDeg], type: 'resolution' };
+                    break;
+                }
+            }
+            if (!safe) safe = { root: key, quality: degree7ths[0], type: 'resolution' };
+        }
+
+        // ── COLOR: modal interchange or chromatic mediant ──
+        const miChords = getModalInterchange(key, modeName);
+        const mediants = getChromaticMediants(currentRoot, currentQuality);
+        // Combine and filter out recent roots for variety
+        const colorCandidates = [...miChords, ...mediants]
+            .filter(c => !recent.includes(c.root) && c.root !== currentRoot && c.root !== safe.root);
+        // Pick semi-randomly but deterministically (based on current root)
+        const color = colorCandidates.length > 0
+            ? colorCandidates[currentRoot % colorCandidates.length]
+            : miChords[0] || { root: (currentRoot + 3) % 12, quality: 'maj7', type: 'chromatic_mediant' };
+
+        // ── SURPRISE: tritone sub or distant secondary dominant ──
+        const secDom = getSecondaryDominant(currentRoot); // V7 of current = leads BACK here
+        const triSub = getTritoneSubstitution((currentRoot + 7) % 12); // tritone sub of V
+        // Pick the one that's not a recent root
+        let surprise;
+        if (!recent.includes(triSub.root) && triSub.root !== currentRoot) {
+            surprise = triSub;
+        } else if (!recent.includes(secDom.root) && secDom.root !== currentRoot) {
+            surprise = secDom;
+        } else {
+            // Distant key: whole tone away
+            surprise = { root: (currentRoot + 2) % 12, quality: 'dom7', type: 'distant' };
+        }
+
+        return { safe, color, surprise };
+    }
+
+    /**
+     * Compute the 16 context chords for the outer ring.
+     * Organized by harmonic relationship to the current chord.
+     *
+     * @param {number} currentRoot - Current chord's root (0-11)
+     * @param {string} currentQuality - Current chord quality
+     * @param {number} key - Current key (0-11)
+     * @param {string} modeName - Current mode name
+     * @returns {Array<{root, quality, type, label}>} 16 context chord objects
+     */
+    function computeContextChords(currentRoot, currentQuality, key, modeName) {
+        const scale = MODES[modeName] || MODES.ionian;
+        const degree7ths = MODE_DEGREE_7THS[modeName] || MODE_DEGREE_7THS.ionian;
+        const context = [];
+        const usedRoots = new Set();
+        usedRoots.add(currentRoot); // don't include current chord
+
+        // Helper: add chord if root not already included
+        function addIfNew(chord) {
+            if (context.length >= 16) return;
+            if (usedRoots.has(chord.root)) return;
+            usedRoots.add(chord.root);
+            // Add display label
+            chord.label = getChordName(chord.root, chord.quality);
+            context.push(chord);
+        }
+
+        // 1. DIATONIC NEIGHBORS (up to 6 chords)
+        for (let deg = 0; deg < 7; deg++) {
+            const root = (key + scale[deg]) % 12;
+            if (root === currentRoot) continue;
+            addIfNew({ root, quality: degree7ths[deg], type: 'diatonic' });
+        }
+
+        // 2. SECONDARY DOMINANTS (V7 of ii, iii, IV, V, vi)
+        const secDomTargets = [1, 2, 3, 4, 5]; // degrees to target
+        for (const targetDeg of secDomTargets) {
+            const targetRoot = (key + scale[targetDeg]) % 12;
+            const sd = getSecondaryDominant(targetRoot);
+            // Only add if it's not already diatonic
+            if (getDiatonicDegree(sd.root, key, modeName) < 0) {
+                addIfNew(sd);
+            }
+        }
+
+        // 3. TRITONE SUBSTITUTIONS of primary dominants
+        const primaryV = (key + scale[4]) % 12;
+        const triSub = getTritoneSubstitution(primaryV);
+        addIfNew(triSub);
+        // Tritone sub of V/ii
+        const secV_ii = getSecondaryDominant((key + scale[1]) % 12);
+        const triSub2 = getTritoneSubstitution(secV_ii.root);
+        addIfNew(triSub2);
+
+        // 4. MODAL INTERCHANGE
+        const miChords = getModalInterchange(key, modeName);
+        for (const mic of miChords) {
+            addIfNew(mic);
+        }
+
+        // 5. EXTENSIONS of current chord (same root, different quality)
+        const extensionQualities = ['maj9', 'min9', 'dom9', 'dom13', 'sus4', 'min11'];
+        for (const eq of extensionQualities) {
+            if (eq === currentQuality || context.length >= 16) continue;
+            // Only add a couple of extensions
+            const extChord = {
+                root: currentRoot, quality: eq, type: 'extension',
+                label: getChordName(currentRoot, eq)
+            };
+            if (context.length < 16) {
+                context.push(extChord);
+                if (context.filter(c => c.type === 'extension').length >= 2) break;
+            }
+        }
+
+        // 6. Fill remaining slots with chromatic mediants
+        if (context.length < 16) {
+            const mediants = getChromaticMediants(currentRoot, currentQuality);
+            for (const med of mediants) {
+                addIfNew(med);
+            }
+        }
+
+        // Pad to exactly 16 if needed (shouldn't happen often)
+        while (context.length < 16) {
+            const fillRoot = (currentRoot + context.length) % 12;
+            context.push({
+                root: fillRoot,
+                quality: 'dom7',
+                type: 'fill',
+                label: getChordName(fillRoot, 'dom7')
+            });
+        }
+
+        return context.slice(0, 16);
+    }
+
+    /**
+     * Get a ring chord info object for any pad in the ring layout.
+     * @param {string} zone - 'inner', 'outer', 'center'
+     * @param {number} index - Position within the zone
+     * @param {object} ringState - Current ring state { activeRoot, activeQuality, key, modeName, contextChords, suggestions }
+     * @returns {{ root, quality, name, type }}
+     */
+    function getRingChordInfo(zone, index, ringState) {
+        const { activeRoot, activeQuality, key, modeName, contextChords, suggestions } = ringState;
+
+        if (zone === 'inner') {
+            // Circle of fifths — index 0-11
+            const root = CIRCLE_OF_FIFTHS[index % 12];
+            const quality = getDefaultQuality(root, key, modeName);
+            return {
+                root,
+                quality,
+                name: getChordName(root, quality),
+                type: getDiatonicDegree(root, key, modeName) >= 0 ? 'diatonic' : 'chromatic',
+                zone: 'inner',
+                index
+            };
+
+        } else if (zone === 'outer') {
+            // Context chords — index 0-15
+            if (contextChords && contextChords[index]) {
+                const c = contextChords[index];
+                return { ...c, name: c.label || getChordName(c.root, c.quality), zone: 'outer', index };
+            }
+            return null;
+
+        } else if (zone === 'center') {
+            // Suggestions — 0=safe, 1=color, 2=surprise, 3=modifier
+            if (index === 3) return { type: 'modifier', zone: 'center', index: 3 };
+            if (!suggestions) return null;
+            const keys = ['safe', 'color', 'surprise'];
+            const s = suggestions[keys[index]];
+            if (!s) return null;
+            return {
+                ...s,
+                name: getChordName(s.root, s.quality),
+                suggestionType: keys[index],
+                zone: 'center',
+                index
+            };
+        }
+        return null;
+    }
+
+    // ──────────────────────────────────────────────
     // PUBLIC API
     // ──────────────────────────────────────────────
 
@@ -895,6 +1217,19 @@
 
         // Navigation
         cycleMode,
+
+        // Ring Chord Field
+        CIRCLE_OF_FIFTHS,
+        CIRCLE_INDEX,
+        getDiatonicDegree,
+        getDefaultQuality,
+        getSecondaryDominant,
+        getTritoneSubstitution,
+        getModalInterchange,
+        getChromaticMediants,
+        computeSuggestions,
+        computeContextChords,
+        getRingChordInfo,
     };
 
     console.log('[ChordFieldEngine] Loaded — jazz/gospel/blues harmony engine');

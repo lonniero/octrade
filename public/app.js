@@ -204,6 +204,13 @@ const chordFieldState = {
     arpDirection: 1,          // 1 = up, -1 = down (for updown mode)
     arpLastNote: null,        // last arp note played (for cleanup)
     arpNotes: [],             // computed arp note pool
+    // Ring Chord Field
+    ringMode: false,          // true = ring layout, false = classic grid
+    ringActiveRoot: 0,        // currently active root pitch class (0-11)
+    ringActiveQuality: 'maj7',// currently active chord quality
+    ringContextChords: [],    // 16 context chord objects for outer ring
+    ringSuggestions: null,     // { safe, color, surprise } for center pads
+    ringBreadcrumbs: [],      // last 8 played chords [{root, quality, name}]
 };
 
 let scenes = [createScene(), createScene(), createScene(), createScene()];
@@ -3226,6 +3233,44 @@ const CF_GLOW_BORDER = [
 const CF_LP_GLOW_COLORS = [43, 45, 9, 3]; // dark teal, mid teal, amber, white
 const CF_LP_BASE_COLOR = 45;  // neutral teal for pre-glow state
 
+// ── Ring Chord Field Colors ──
+// CSS colors per zone
+const CF_RING_COLORS = {
+    inner_diatonic: 'rgba(50, 180, 180, 0.8)',     // bright teal
+    inner_chromatic: 'rgba(40, 80, 90, 0.5)',        // dim teal
+    inner_active: 'rgba(200, 255, 255, 0.95)',    // bright white-teal
+    outer_diatonic: 'rgba(70, 140, 170, 0.7)',      // blue-teal
+    outer_secondary: 'rgba(200, 140, 50, 0.75)',     // amber
+    outer_tritone: 'rgba(200, 100, 60, 0.75)',     // orange
+    outer_modal: 'rgba(180, 80, 120, 0.7)',      // rose
+    outer_extension: 'rgba(100, 160, 140, 0.7)',     // muted teal
+    outer_mediant: 'rgba(140, 100, 180, 0.7)',     // purple
+    center_safe: 'rgba(80, 200, 120, 0.85)',     // green
+    center_color: 'rgba(220, 180, 50, 0.85)',     // amber/gold
+    center_surprise: 'rgba(70, 130, 220, 0.85)',     // blue
+    center_modifier: 'rgba(140, 80, 200, 0.8)',      // purple
+    breadcrumb: 'rgba(60, 80, 90, 0.4)',        // dim grey-teal
+    breadcrumb_text: 'rgba(180, 200, 210, 0.6)',     // dim text
+};
+
+// LP MK3 color indices per zone
+const CF_RING_LP = {
+    inner_diatonic: 37,  // teal
+    inner_chromatic: 43,  // dark teal
+    inner_active: 3,   // white
+    outer_diatonic: 45,  // mid blue
+    outer_secondary: 9,   // amber
+    outer_tritone: 11,  // orange
+    outer_modal: 53,  // pink
+    outer_extension: 33,  // muted teal
+    outer_mediant: 49,  // purple
+    center_safe: 21,  // green
+    center_color: 9,   // amber
+    center_surprise: 45,  // blue
+    center_modifier: 49,  // purple
+    breadcrumb: 1,   // dim white
+};
+
 // Glow multipliers for CSS opacity (less relevant now, but kept for fallback)
 const CF_GLOW_OPACITY = [0.3, 0.6, 0.85, 1.0]; // 0,1,2,3 shared notes
 
@@ -3420,6 +3465,13 @@ function handleChordFieldPadPress(row, col) {
         if (!cf.rhodes) return;
     }
 
+    // ── Ring mode routing ──
+    if (cf.ringMode) {
+        cfHandleRingPadPress(row, col);
+        return;
+    }
+
+    // ── Classic grid mode (unchanged) ──
     const { root, quality } = cfGetPadInfo(row, col);
 
     // Voice the chord
@@ -3483,8 +3535,212 @@ function handleChordFieldPadPress(row, col) {
     renderGrid();  // renderGrid calls updateLaunchpadLEDs internally
 }
 
+// ──────────────────────────────────────────────
+// RING CHORD FIELD — Zone-based pad handler
+// ──────────────────────────────────────────────
+
+/**
+ * Determine which ring zone a pad belongs to.
+ * Returns { zone: 'inner'|'outer'|'small'|'center'|null, index: number }
+ */
+function cfGetRingZone(row, col) {
+    // Check center first (most specific)
+    const sceneIdx = SCENE_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+    if (sceneIdx !== -1) return { zone: 'center', index: sceneIdx };
+
+    // Check small ring (breadcrumbs)
+    const smallIdx = SMALL_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+    if (smallIdx !== -1) return { zone: 'small', index: smallIdx };
+
+    // Check inner ring (circle of fifths)
+    const innerIdx = INNER_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+    if (innerIdx !== -1) return { zone: 'inner', index: innerIdx };
+
+    // Check outer ring (context chords)
+    const outerIdx = BIG_GRID_POSITIONS.findIndex(([r, c]) => r === row && c === col);
+    if (outerIdx !== -1) return { zone: 'outer', index: outerIdx };
+
+    return { zone: null, index: -1 };
+}
+
+/**
+ * Handle a pad press in ring chord field mode.
+ * Routes to the appropriate zone handler.
+ */
+function cfHandleRingPadPress(row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetRingZone(row, col);
+
+    if (!zone) return; // pad isn't in any zone
+
+    let chordInfo = null;
+
+    if (zone === 'inner') {
+        // Circle of fifths → select root + play diatonic chord
+        const root = ChordFieldEngine.CIRCLE_OF_FIFTHS[index % 12];
+        const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+        const quality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
+        chordInfo = { root, quality, type: 'diatonic', zone: 'inner' };
+
+    } else if (zone === 'outer') {
+        // Context chord → play it
+        if (cf.ringContextChords && cf.ringContextChords[index]) {
+            chordInfo = cf.ringContextChords[index];
+            chordInfo.zone = 'outer';
+        }
+
+    } else if (zone === 'center') {
+        if (index === 3) {
+            // Modifier pad → cycle voicing
+            cf.voicingIndex = (cf.voicingIndex + 1) % ChordFieldEngine.VOICING_TYPES.length;
+            cf.lastChordLabel = ChordFieldEngine.VOICING_LABELS[ChordFieldEngine.VOICING_TYPES[cf.voicingIndex]];
+            updateChordFieldUI();
+            renderGrid();
+            return;
+        }
+        // Suggestion pads: 0=safe, 1=color, 2=surprise
+        if (cf.ringSuggestions) {
+            const keys = ['safe', 'color', 'surprise'];
+            const s = cf.ringSuggestions[keys[index]];
+            if (s) {
+                chordInfo = { ...s, zone: 'center', suggestionType: keys[index] };
+            }
+        }
+
+    } else if (zone === 'small') {
+        // Breadcrumb → replay that chord
+        if (cf.ringBreadcrumbs[index]) {
+            const bc = cf.ringBreadcrumbs[index];
+            chordInfo = { root: bc.root, quality: bc.quality, type: 'breadcrumb', zone: 'small' };
+        }
+    }
+
+    if (!chordInfo) return;
+
+    // ── Play the chord ──
+    cfPlayRingChord(cf, chordInfo.root, chordInfo.quality);
+
+    // ── Cascade: update all rings ──
+    cfCascadeRingUpdate(cf, chordInfo.root, chordInfo.quality);
+
+    // ── Update active pad tracking ──
+    cf.activePadRow = row;
+    cf.activePadCol = col;
+
+    updateChordFieldUI();
+    renderGrid();
+}
+
+/**
+ * Play a chord in ring mode (same logic as classic, but takes root/quality directly).
+ */
+function cfPlayRingChord(cf, root, quality) {
+    const voicingType = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex];
+    const voiced = ChordFieldEngine.voiceChord(root, quality, voicingType, cf.prevVoicing, cf.octaveOffset);
+    if (!voiced || voiced.length === 0) return;
+
+    cfStopPlayback(cf);
+    cf.activeNotes = voiced;
+
+    if (cf.arpMode !== 'off') {
+        cfPlayChordHumanized(cf, voiced);
+        cf.arpNotes = cfBuildArpNotes(voiced);
+        cf.arpIndex = 0;
+        cf.arpDirection = 1;
+        const beatMs = 60000 / state.bpm;
+        setTimeout(() => {
+            voiced.forEach(n => cf.rhodes.noteOff(n));
+            cfStartArp(cf);
+        }, beatMs);
+    } else {
+        cfPlayChordHumanized(cf, voiced);
+        if (cf.rhythmPattern > 0) {
+            cfStartRhythm(cf);
+        } else {
+            setTimeout(() => {
+                voiced.forEach(n => cf.rhodes.noteOff(n));
+                if (cf.activeNotes === voiced) cf.activeNotes = [];
+            }, 1500);
+        }
+    }
+
+    cf.prevVoicing = voiced;
+}
+
+/**
+ * Cascade update: recompute all ring zones after a chord is played.
+ */
+function cfCascadeRingUpdate(cf, newRoot, newQuality) {
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+
+    // Push to breadcrumbs
+    if (cf.ringActiveRoot !== undefined) {
+        const prevName = ChordFieldEngine.getChordName(cf.ringActiveRoot, cf.ringActiveQuality);
+        cf.ringBreadcrumbs.unshift({
+            root: cf.ringActiveRoot,
+            quality: cf.ringActiveQuality,
+            name: prevName
+        });
+        // Keep only 8 breadcrumbs
+        if (cf.ringBreadcrumbs.length > 8) cf.ringBreadcrumbs.length = 8;
+    }
+
+    // Update active chord
+    cf.ringActiveRoot = newRoot;
+    cf.ringActiveQuality = newQuality;
+
+    // Recompute context chords for outer ring
+    cf.ringContextChords = ChordFieldEngine.computeContextChords(
+        newRoot, newQuality, cf.key, modeName
+    );
+
+    // Recompute suggestions for center pads
+    const recentRoots = cf.ringBreadcrumbs.map(b => b.root);
+    cf.ringSuggestions = ChordFieldEngine.computeSuggestions(
+        newRoot, newQuality, cf.key, modeName, recentRoots
+    );
+
+    // Update display label
+    cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, newQuality);
+
+    console.log(`🎵 Ring: ${cf.lastChordLabel} | Suggestions: ` +
+        `safe=${ChordFieldEngine.getChordName(cf.ringSuggestions.safe.root, cf.ringSuggestions.safe.quality)}, ` +
+        `color=${ChordFieldEngine.getChordName(cf.ringSuggestions.color.root, cf.ringSuggestions.color.quality)}, ` +
+        `surprise=${ChordFieldEngine.getChordName(cf.ringSuggestions.surprise.root, cf.ringSuggestions.surprise.quality)}`
+    );
+}
+
+/**
+ * Initialize ring mode: set up initial state and compute first set of context chords.
+ */
+function cfInitRingMode(cf) {
+    cf.ringMode = true;
+    cf.ringActiveRoot = cf.key; // start on the key root
+    cf.ringActiveQuality = ChordFieldEngine.getDefaultQuality(cf.key, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex]);
+    cf.ringBreadcrumbs = [];
+
+    // Compute initial context chords and suggestions
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    cf.ringContextChords = ChordFieldEngine.computeContextChords(
+        cf.ringActiveRoot, cf.ringActiveQuality, cf.key, modeName
+    );
+    cf.ringSuggestions = ChordFieldEngine.computeSuggestions(
+        cf.ringActiveRoot, cf.ringActiveQuality, cf.key, modeName, []
+    );
+    cf.lastChordLabel = ChordFieldEngine.getChordName(cf.ringActiveRoot, cf.ringActiveQuality);
+    console.log('[ChordField] 🔵 Ring mode initialized');
+}
+
 function renderChordFieldPad(pad, row, col) {
     const cf = chordFieldState;
+
+    // ── Ring mode rendering ──
+    if (cf.ringMode) {
+        renderRingPad(pad, row, col);
+        return;
+    }
+
+    // ── Classic grid rendering (unchanged) ──
     const { root, quality } = cfGetPadInfo(row, col);
 
     // Get glow level
@@ -3528,6 +3784,150 @@ function renderChordFieldPad(pad, row, col) {
     } else {
         pad.style.borderColor = borderColor;
         pad.style.boxShadow = 'none';
+    }
+}
+
+/**
+ * Render a single pad in ring chord field mode.
+ * Colors and labels are determined by zone membership.
+ */
+function renderRingPad(pad, row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetRingZone(row, col);
+    const isActive = (cf.activePadRow === row && cf.activePadCol === col);
+
+    pad.style.transition = 'all 0.2s ease';
+    pad.style.fontSize = '8px';
+    pad.style.fontWeight = '600';
+    pad.style.letterSpacing = '0.3px';
+
+    if (zone === 'inner') {
+        // Circle of fifths
+        const root = ChordFieldEngine.CIRCLE_OF_FIFTHS[index % 12];
+        const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+        const isDiatonic = ChordFieldEngine.getDiatonicDegree(root, cf.key, modeName) >= 0;
+        const isActiveRoot = root === cf.ringActiveRoot;
+        const quality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
+
+        pad.textContent = ChordFieldEngine.getChordName(root, quality);
+
+        if (isActiveRoot || isActive) {
+            pad.style.background = CF_RING_COLORS.inner_active;
+            pad.style.color = '#1a1a2e';
+            pad.style.borderColor = 'rgba(200, 255, 255, 0.9)';
+            pad.style.boxShadow = '0 0 16px rgba(100, 220, 220, 0.6)';
+            pad.style.opacity = '1';
+        } else if (isDiatonic) {
+            pad.style.background = CF_RING_COLORS.inner_diatonic;
+            pad.style.color = '#fff';
+            pad.style.borderColor = 'rgba(80, 200, 200, 0.4)';
+            pad.style.boxShadow = '0 0 6px rgba(50, 180, 180, 0.2)';
+            pad.style.opacity = '0.9';
+        } else {
+            pad.style.background = CF_RING_COLORS.inner_chromatic;
+            pad.style.color = 'rgba(180, 200, 210, 0.6)';
+            pad.style.borderColor = 'rgba(60, 90, 100, 0.3)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.6';
+        }
+
+        // Breadcrumb marker: check if this root is in breadcrumbs
+        const bcIdx = cf.ringBreadcrumbs.findIndex(b => b.root === root);
+        if (bcIdx >= 0 && !isActiveRoot) {
+            pad.style.borderColor = 'rgba(180, 200, 210, 0.5)';
+            pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
+        }
+
+    } else if (zone === 'outer') {
+        // Context chords
+        const ctx = cf.ringContextChords?.[index];
+        if (ctx) {
+            pad.textContent = ctx.label || ChordFieldEngine.getChordName(ctx.root, ctx.quality);
+
+            // Color by type
+            const typeColorMap = {
+                diatonic: CF_RING_COLORS.outer_diatonic,
+                secondary_dom: CF_RING_COLORS.outer_secondary,
+                tritone_sub: CF_RING_COLORS.outer_tritone,
+                modal_interchange: CF_RING_COLORS.outer_modal,
+                extension: CF_RING_COLORS.outer_extension,
+                chromatic_mediant: CF_RING_COLORS.outer_mediant,
+            };
+            pad.style.background = typeColorMap[ctx.type] || CF_RING_COLORS.outer_diatonic;
+            pad.style.color = '#fff';
+            pad.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+            pad.style.boxShadow = '0 0 6px rgba(100, 140, 180, 0.15)';
+            pad.style.opacity = isActive ? '1' : '0.85';
+
+            if (isActive) {
+                pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
+                pad.style.boxShadow = '0 0 16px rgba(255, 220, 100, 0.6)';
+            }
+        } else {
+            pad.textContent = '';
+            pad.style.background = 'rgba(25, 30, 35, 0.3)';
+            pad.style.borderColor = 'rgba(40, 50, 60, 0.2)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.3';
+        }
+
+    } else if (zone === 'center') {
+        // Suggestion pads
+        const labels = ['▶', '◆', '✦', '⟳'];
+        const colorKeys = ['center_safe', 'center_color', 'center_surprise', 'center_modifier'];
+        pad.style.background = CF_RING_COLORS[colorKeys[index]];
+        pad.style.borderColor = 'rgba(255, 255, 255, 0.25)';
+        pad.style.fontSize = '10px';
+        pad.style.opacity = '1';
+
+        if (index < 3 && cf.ringSuggestions) {
+            const keys = ['safe', 'color', 'surprise'];
+            const s = cf.ringSuggestions[keys[index]];
+            if (s) {
+                pad.textContent = ChordFieldEngine.getChordName(s.root, s.quality);
+                pad.style.boxShadow = `0 0 12px ${CF_RING_COLORS[colorKeys[index]].replace('0.85', '0.4')}`;
+            } else {
+                pad.textContent = labels[index];
+            }
+        } else {
+            // Modifier pad
+            const voicing = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex] || 'close';
+            pad.textContent = voicing.slice(0, 4);
+            pad.style.boxShadow = `0 0 8px ${CF_RING_COLORS.center_modifier.replace('0.8', '0.3')}`;
+        }
+
+        if (isActive) {
+            pad.style.borderColor = 'rgba(255, 255, 255, 0.8)';
+            pad.style.boxShadow = '0 0 18px rgba(255, 255, 255, 0.4)';
+        }
+
+    } else if (zone === 'small') {
+        // Breadcrumb trail
+        const bc = cf.ringBreadcrumbs[index];
+        if (bc) {
+            pad.textContent = bc.name || '';
+            pad.style.background = CF_RING_COLORS.breadcrumb;
+            pad.style.color = CF_RING_COLORS.breadcrumb_text;
+            pad.style.borderColor = 'rgba(80, 100, 110, 0.25)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.6';
+            pad.style.fontSize = '7px';
+        } else {
+            pad.textContent = '';
+            pad.style.background = 'rgba(25, 30, 40, 0.2)';
+            pad.style.borderColor = 'rgba(40, 50, 60, 0.15)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.2';
+        }
+
+    } else {
+        // Not in any zone — dark empty pad
+        pad.textContent = '';
+        pad.style.background = 'rgba(20, 25, 30, 0.2)';
+        pad.style.borderColor = 'rgba(40, 50, 60, 0.1)';
+        pad.style.boxShadow = 'none';
+        pad.style.opacity = '0.15';
+        pad.style.color = '#fff';
     }
 }
 
@@ -3619,10 +4019,14 @@ function handleChordFieldCC(buttonIdx) {
             cf.glowGrid = null;
             console.log(`[ChordField] Mode: ${ChordFieldEngine.MODE_ORDER[cf.modeIndex]}`);
             break;
-        case 7: // Mixer — root rotation (circle of 4ths)
-            cf.rootRotation = (cf.rootRotation + 1) % 7;
-            cf.glowGrid = null;
-            console.log(`[ChordField] Root rotation: ${cf.rootRotation}`);
+        case 7: // Mixer — toggle ring/classic mode
+            cf.ringMode = !cf.ringMode;
+            if (cf.ringMode) {
+                cfInitRingMode(cf);
+            } else {
+                cf.glowGrid = null;
+            }
+            console.log(`[ChordField] ${cf.ringMode ? '🔵 Ring' : '🔴 Classic'} mode`);
             break;
     }
     updateChordFieldUI();
@@ -3640,6 +4044,12 @@ function handleChordFieldSideButton(index) {
 function getChordFieldLPColor(digitalRow, digitalCol) {
     const cf = chordFieldState;
 
+    // ── Ring mode LP colors ──
+    if (cf.ringMode) {
+        return getRingChordFieldLPColor(digitalRow, digitalCol);
+    }
+
+    // ── Classic grid LP colors ──
     // Active pad: bright white
     if (cf.activePadRow === digitalRow && cf.activePadCol === digitalCol) {
         return LP_COLOR.WHITE;
@@ -3651,6 +4061,47 @@ function getChordFieldLPColor(digitalRow, digitalCol) {
     // With glow grid, use tiered brightness
     const glow = cf.glowGrid[digitalRow * 8 + digitalCol] || 0;
     return CF_LP_GLOW_COLORS[Math.min(glow, 3)];
+}
+
+/**
+ * Launchpad LED color for ring chord field mode.
+ */
+function getRingChordFieldLPColor(row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetRingZone(row, col);
+    const isActive = (cf.activePadRow === row && cf.activePadCol === col);
+
+    if (isActive) return LP_COLOR.WHITE;
+
+    if (zone === 'inner') {
+        const root = ChordFieldEngine.CIRCLE_OF_FIFTHS[index % 12];
+        if (root === cf.ringActiveRoot) return CF_RING_LP.inner_active;
+        const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+        const isDiatonic = ChordFieldEngine.getDiatonicDegree(root, cf.key, modeName) >= 0;
+        return isDiatonic ? CF_RING_LP.inner_diatonic : CF_RING_LP.inner_chromatic;
+
+    } else if (zone === 'outer') {
+        const ctx = cf.ringContextChords?.[index];
+        if (!ctx) return 0; // off
+        const typeLPMap = {
+            diatonic: CF_RING_LP.outer_diatonic,
+            secondary_dom: CF_RING_LP.outer_secondary,
+            tritone_sub: CF_RING_LP.outer_tritone,
+            modal_interchange: CF_RING_LP.outer_modal,
+            extension: CF_RING_LP.outer_extension,
+            chromatic_mediant: CF_RING_LP.outer_mediant,
+        };
+        return typeLPMap[ctx.type] || CF_RING_LP.outer_diatonic;
+
+    } else if (zone === 'center') {
+        const lpKeys = ['center_safe', 'center_color', 'center_surprise', 'center_modifier'];
+        return CF_RING_LP[lpKeys[index]] || 0;
+
+    } else if (zone === 'small') {
+        return cf.ringBreadcrumbs[index] ? CF_RING_LP.breadcrumb : 0;
+    }
+
+    return 0; // pad not in any zone — off
 }
 
 function getChordFieldSideLPColor(index) {
@@ -3749,6 +4200,22 @@ function setupChordFieldListeners() {
         const idx = (CF_ARP_RATES.indexOf(cf.arpRate) + 1) % CF_ARP_RATES.length;
         cf.arpRate = CF_ARP_RATES[idx];
         cfArpRateBtn.textContent = '♪ ' + cf.arpRate;
+    });
+
+    // ── Ring Mode Toggle ──
+    const cfRingToggle = document.getElementById('cf-ring-toggle');
+    if (cfRingToggle) cfRingToggle.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cf.ringMode = !cf.ringMode;
+        if (cf.ringMode) {
+            cfInitRingMode(cf);
+        } else {
+            cf.glowGrid = null;
+        }
+        cfRingToggle.textContent = cf.ringMode ? '🔵 Ring' : '🟠 Grid';
+        cfRingToggle.classList.toggle('active', cf.ringMode);
+        updateChordFieldUI();
+        renderGrid();
     });
 }
 
