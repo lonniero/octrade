@@ -13,6 +13,7 @@
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="tutorial.css">
 </head>
 
 <body>
@@ -22,6 +23,8 @@
             <div class="header-left">
                 <h1 class="logo">OCTADRE</h1>
                 <span class="logo-sub">Digital Sequencer</span>
+                <button id="btn-tutorial" class="tutorial-help-btn" title="Show Tutorial"
+                    onclick="OctadreTutorial.start()">?</button>
             </div>
             <div class="header-center">
                 <div class="transport-controls">
@@ -438,6 +441,8 @@
         </main>
     </div>
 
+    <script src="tutorial.js" defer></script>
+    <script src="hints.js" defer></script>
     <script src="audio-engine.js" defer></script>
     <script src="harmony-engine.js" defer></script>
     <script src="chord-field-engine.js" defer></script>

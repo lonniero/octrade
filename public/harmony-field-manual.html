@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCTADRE — Harmony Field Manual</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a14;
+            color: #e0e0e0;
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .manual {
+            max-width: 900px;
+            width: 100%;
+        }
+
+        .title {
+            text-align: center;
+            margin-bottom: 0.3rem;
+            font-size: 2rem;
+            font-weight: 700;
+            letter-spacing: 0.15em;
+            background: linear-gradient(135deg, #6dd5ed, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            text-align: center;
+            font-size: 0.85rem;
+            color: #888;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            margin-bottom: 2rem;
+        }
+
+        /* ── Grid Container ── */
+        .device {
+            display: flex;
+            gap: 1.5rem;
+            justify-content: center;
+            align-items: flex-start;
+            margin-bottom: 2.5rem;
+        }
+
+        .grid-wrap {
+            background: #111118;
+            border: 2px solid #222;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(8, 56px);
+            grid-template-rows: repeat(8, 56px);
+            gap: 4px;
+        }
+
+        .pad {
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 600;
+            position: relative;
+            border: 1.5px solid rgba(255, 255, 255, 0.08);
+            text-align: center;
+            line-height: 1.2;
+            transition: all 0.2s;
+        }
+
+        /* Zone: Empty */
+        .pad.empty {
+            background: rgba(20, 22, 30, 0.5);
+            border-color: rgba(30, 35, 45, 0.3);
+        }
+
+        /* Zone: Outer Ring — Quadrant colors */
+        .pad.outer-resolve {
+            background: rgba(50, 180, 80, 0.5);
+            border-color: rgba(60, 200, 90, 0.6);
+            box-shadow: 0 0 8px rgba(50, 180, 80, 0.25);
+            color: #b0f0c0;
+        }
+
+        .pad.outer-color {
+            background: rgba(200, 170, 40, 0.5);
+            border-color: rgba(220, 190, 50, 0.6);
+            box-shadow: 0 0 8px rgba(200, 170, 40, 0.25);
+            color: #f0e8b0;
+        }
+
+        .pad.outer-tension {
+            background: rgba(140, 80, 200, 0.5);
+            border-color: rgba(160, 100, 220, 0.6);
+            box-shadow: 0 0 8px rgba(140, 80, 200, 0.25);
+            color: #d8c0f0;
+        }
+
+        .pad.outer-portal {
+            background: rgba(200, 60, 140, 0.5);
+            border-color: rgba(220, 80, 160, 0.6);
+            box-shadow: 0 0 8px rgba(200, 60, 140, 0.25);
+            color: #f0c0e0;
+        }
+
+        /* Zone: Inner Ring — Circle of Fifths */
+        .pad.inner {
+            background: rgba(60, 100, 180, 0.45);
+            border-color: rgba(80, 130, 220, 0.5);
+            box-shadow: 0 0 8px rgba(60, 100, 180, 0.2);
+            color: #c0d8f8;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        /* Zone: Small Ring — Quality Modifiers */
+        .pad.small {
+            background: rgba(180, 150, 50, 0.4);
+            border-color: rgba(200, 170, 60, 0.5);
+            box-shadow: 0 0 6px rgba(180, 150, 50, 0.2);
+            color: #f0e8b0;
+            font-size: 8px;
+            font-weight: 600;
+        }
+
+        /* Zone: Center — Loop Controls */
+        .pad.center-rec {
+            background: rgba(200, 50, 50, 0.7);
+            border-color: rgba(240, 70, 70, 0.7);
+            box-shadow: 0 0 12px rgba(220, 40, 40, 0.4);
+            color: #ffc0c0;
+            font-size: 8px;
+            font-weight: 700;
+        }
+
+        .pad.center-play {
+            background: rgba(50, 160, 70, 0.65);
+            border-color: rgba(60, 200, 80, 0.7);
+            box-shadow: 0 0 12px rgba(50, 180, 70, 0.35);
+            color: #c0f0c8;
+            font-size: 8px;
+            font-weight: 700;
+        }
+
+        .pad.center-undo {
+            background: rgba(180, 150, 50, 0.55);
+            border-color: rgba(200, 170, 60, 0.6);
+            box-shadow: 0 0 10px rgba(180, 150, 50, 0.3);
+            color: #f0e8b0;
+            font-size: 8px;
+            font-weight: 700;
+        }
+
+        .pad.center-voicing {
+            background: rgba(120, 80, 180, 0.55);
+            border-color: rgba(140, 100, 200, 0.6);
+            box-shadow: 0 0 10px rgba(120, 80, 180, 0.3);
+            color: #d8c0f0;
+            font-size: 8px;
+            font-weight: 700;
+        }
+
+        /* ── Side Buttons ── */
+        .side-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding-top: 12px;
+        }
+
+        .side-btn {
+            width: 56px;
+            height: 56px;
+            border-radius: 6px;
+            background: rgba(30, 35, 50, 0.6);
+            border: 1.5px solid rgba(80, 90, 110, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 7px;
+            font-weight: 600;
+            color: #a0b0c0;
+            text-align: center;
+            line-height: 1.3;
+        }
+
+        .side-btn.active {
+            border-color: rgba(120, 160, 220, 0.6);
+            color: #c0d8f8;
+        }
+
+        /* ── Legend ── */
+        .legend {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.2rem 2rem;
+            margin-top: 1.5rem;
+        }
+
+        .legend-section h3 {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+
+        .legend-section ul {
+            list-style: none;
+            font-size: 0.72rem;
+            line-height: 1.7;
+            color: #999;
+        }
+
+        .legend-section ul li strong {
+            color: #ccc;
+        }
+
+        /* Zone label colors for legend headings */
+        .z-outer {
+            color: #6dd5ed;
+        }
+
+        .z-inner {
+            color: #80b0f0;
+        }
+
+        .z-small {
+            color: #e0d080;
+        }
+
+        .z-center {
+            color: #e0a0b0;
+        }
+
+        .z-side {
+            color: #a0b0c0;
+        }
+
+        .dot-resolve {
+            background: rgba(50, 180, 80, 0.8);
+        }
+
+        .dot-color {
+            background: rgba(200, 170, 40, 0.8);
+        }
+
+        .dot-tension {
+            background: rgba(140, 80, 200, 0.8);
+        }
+
+        .dot-portal {
+            background: rgba(200, 60, 140, 0.8);
+        }
+
+        .dot-inner {
+            background: rgba(60, 100, 180, 0.8);
+        }
+
+        .dot-small {
+            background: rgba(180, 150, 50, 0.8);
+        }
+
+        .dot-rec {
+            background: rgba(200, 50, 50, 0.8);
+        }
+
+        .dot-play {
+            background: rgba(50, 160, 70, 0.8);
+        }
+
+        .dot-undo {
+            background: rgba(180, 150, 50, 0.8);
+        }
+
+        .dot-voicing {
+            background: rgba(120, 80, 180, 0.8);
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 2rem;
+            font-size: 0.65rem;
+            color: #555;
+            letter-spacing: 0.1em;
+        }
+
+        /* Annotations */
+        .annotation {
+            position: absolute;
+            font-size: 6px;
+            color: rgba(255, 255, 255, 0.3);
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="manual">
+        <h1 class="title">OCTADRE</h1>
+        <p class="subtitle">Harmony Field — Ring Layout Reference</p>
+
+        <div class="device">
+            <!-- 8x8 Grid -->
+            <div class="grid-wrap">
+                <div class="grid" id="grid"></div>
+            </div>
+
+            <!-- Side Buttons (CC row) -->
+            <div class="side-buttons">
+                <div class="side-btn active">▲<br>INV UP</div>
+                <div class="side-btn active">▼<br>INV DN</div>
+                <div class="side-btn active">◄<br>KEY ♭</div>
+                <div class="side-btn active">►<br>KEY ♯</div>
+                <div class="side-btn active">◄<br>MODE ♭</div>
+                <div class="side-btn active">►<br>MODE ♯</div>
+                <div class="side-btn" style="opacity:0.3"></div>
+                <div class="side-btn" style="opacity:0.3"></div>
+            </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-section">
+                <h3 class="z-outer"><span class="legend-dot dot-resolve"></span> Outer Ring — Context Chords (16)</h3>
+                <ul>
+                    <li><span class="legend-dot dot-resolve"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>Resolve</strong> — Diatonic resolutions (V→I, IV→I)
+                    </li>
+                    <li><span class="legend-dot dot-color"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>Color</strong> — Modal interchange, borrowed chords
+                    </li>
+                    <li><span class="legend-dot dot-tension"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>Tension</strong> — Tritone subs, secondary dominants
+                    </li>
+                    <li><span class="legend-dot dot-portal"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>Portal</strong> — Distant keys, chromatic mediants
+                    </li>
+                </ul>
+            </div>
+
+            <div class="legend-section">
+                <h3 class="z-inner"><span class="legend-dot dot-inner"></span> Inner Ring — Circle of Fifths (12)</h3>
+                <ul>
+                    <li>Select root note from the <strong>circle of fifths</strong></li>
+                    <li>Chord quality auto-assigned by <strong>diatonic function</strong></li>
+                    <li>Pressing a root updates the outer ring context</li>
+                    <li>Bright = diatonic, dim = chromatic</li>
+                </ul>
+            </div>
+
+            <div class="legend-section">
+                <h3 class="z-small"><span class="legend-dot dot-small"></span> Small Ring — Quality Modifiers (8)</h3>
+                <ul>
+                    <li><strong>7th</strong> (default) · <strong>9th</strong> · <strong>11th</strong> ·
+                        <strong>13th</strong>
+                    </li>
+                    <li><strong>sus4</strong> · <strong>add9</strong> · <strong>6/9</strong> · <strong>triad</strong>
+                    </li>
+                    <li>Toggle to upgrade chord extensions globally</li>
+                    <li>Active modifier glows amber on Launchpad</li>
+                </ul>
+            </div>
+
+            <div class="legend-section">
+                <h3 class="z-center"><span class="legend-dot dot-rec"></span> Center — Loop Controls (4)</h3>
+                <ul>
+                    <li><span class="legend-dot dot-rec"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>REC</strong> — Start/stop recording chord loop
+                    </li>
+                    <li><span class="legend-dot dot-play"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>PLAY</strong> — Play/pause recorded loop
+                    </li>
+                    <li><span class="legend-dot dot-undo"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>UNDO</strong> — Restore previous chord state
+                    </li>
+                    <li><span class="legend-dot dot-voicing"
+                            style="display:inline-block;width:8px;height:8px;margin-right:4px;vertical-align:middle"></span>
+                        <strong>VOICING</strong> — Cycle: close, drop2, open…
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <p class="footer">OCTADRE HARMONY FIELD v2.0 — SIDE BUTTONS: ▲▼ = INVERSION · ◄► = KEY · ◄► = MODE (LYDIAN ↔
+            LOCRIAN)</p>
+    </div>
+
+    <script>
+        // ── Zone Positions (matching app.js exactly) ──
+        const outer = [
+            [0, 3], [1, 2], [2, 1], [3, 0], // resolve (top-left diagonal down)
+            [4, 0], [5, 1], [6, 2], [7, 3], // color (bottom-left diagonal right)
+            [7, 4], [6, 5], [5, 6], [4, 7], // tension (bottom-right diagonal up)
+            [3, 7], [2, 6], [1, 5], [0, 4]  // portal (top-right diagonal left)
+        ];
+
+        const inner = [
+            [1, 3], [2, 2], [3, 1], [4, 1], // left
+            [5, 2], [6, 3], [6, 4], [5, 5], // bottom
+            [4, 6], [3, 6], [2, 5], [1, 4]  // right
+        ];
+
+        const small = [
+            [2, 3], [3, 2], [4, 2], [5, 3], // left
+            [5, 4], [4, 5], [3, 5], [2, 4]  // right
+        ];
+
+        const center = [
+            [3, 3], [3, 4], // top-left, top-right
+            [4, 3], [4, 4]  // bottom-left, bottom-right
+        ];
+
+        // Outer ring quadrant assignment:
+        // Indices 0-3 (BIG_GRID[0:4]): Resolve  → [0,3],[1,2],[2,1],[3,0] (top-left diagonal down)
+        // Indices 4-7 (BIG_GRID[4:8]): Color    → [4,0],[5,1],[6,2],[7,3] (bottom-left diagonal right)
+        // Indices 8-11 (BIG_GRID[8:12]): Tension → [7,4],[6,5],[5,6],[4,7] (bottom-right diagonal up)
+        // Indices 12-15 (BIG_GRID[12:16]): Portal→ [3,7],[2,6],[1,5],[0,4] (top-right diagonal left)
+        const outerQuadrants = [
+            'resolve', 'resolve', 'resolve', 'resolve',
+            'color', 'color', 'color', 'color',
+            'tension', 'tension', 'tension', 'tension',
+            'portal', 'portal', 'portal', 'portal'
+        ];
+
+        // Circle of fifths note names (12 notes, indices 0-11)
+        const cofNames = ['C', 'G', 'D', 'A', 'E', 'B', 'F♯', 'D♭', 'A♭', 'E♭', 'B♭', 'F'];
+
+        // Quality modifier labels
+        const modLabels = ['7th', '9th', '11th', '13th', 'sus4', 'add9', '6/9', 'triad'];
+
+        // Center pad labels
+        const centerLabels = ['⏺ REC', '▶ PLAY', '↩ UNDO', '⟳ VOIC'];
+        const centerClasses = ['center-rec', 'center-play', 'center-undo', 'center-voicing'];
+
+        // Build lookup maps
+        function key(r, c) { return r + ',' + c; }
+
+        const outerMap = {};
+        outer.forEach((pos, i) => { outerMap[key(pos[0], pos[1])] = outerQuadrants[i]; });
+
+        const innerMap = {};
+        inner.forEach((pos, i) => { innerMap[key(pos[0], pos[1])] = cofNames[i]; });
+
+        const smallMap = {};
+        small.forEach((pos, i) => { smallMap[key(pos[0], pos[1])] = modLabels[i]; });
+
+        const centerMap = {};
+        center.forEach((pos, i) => { centerMap[key(pos[0], pos[1])] = i; });
+
+        // Render grid
+        const grid = document.getElementById('grid');
+        for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+                const k = key(r, c);
+                const pad = document.createElement('div');
+                pad.className = 'pad';
+
+                if (centerMap[k] !== undefined) {
+                    const idx = centerMap[k];
+                    pad.classList.add(centerClasses[idx]);
+                    pad.textContent = centerLabels[idx];
+                } else if (smallMap[k]) {
+                    pad.classList.add('small');
+                    pad.textContent = smallMap[k];
+                } else if (innerMap[k]) {
+                    pad.classList.add('inner');
+                    pad.textContent = innerMap[k];
+                } else if (outerMap[k]) {
+                    pad.classList.add('outer-' + outerMap[k]);
+                    pad.textContent = outerMap[k].toUpperCase().slice(0, 3);
+                } else {
+                    pad.classList.add('empty');
+                }
+
+                grid.appendChild(pad);
+            }
+        }
+    </script>
+</body>
+
+</html>

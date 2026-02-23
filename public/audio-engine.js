@@ -845,6 +845,278 @@ class OctadreAudioEngine {
         }
         return bytes.buffer;
     }
+
+    // ──────────────────────────────────────────────
+    // BUILT-IN DRUM SOUND SYNTHESIZER
+    // Generates 8 classic drum sounds via offline rendering
+    // so the app is immediately playable without loading files.
+    // ──────────────────────────────────────────────
+
+    /**
+     * Generate all 8 built-in drum sounds and assign them to tracks 0-7.
+     * Only loads into tracks that don't already have a sample.
+     */
+    async generateBuiltInDrums() {
+        if (!this.initialized) await this.init();
+
+        const sampleRate = this.audioContext.sampleRate;
+
+        const drums = [
+            { name: 'Kick',           gen: (sr) => this._synthKick(sr) },
+            { name: 'Snare',          gen: (sr) => this._synthSnare(sr) },
+            { name: 'Clap',           gen: (sr) => this._synthClap(sr) },
+            { name: 'Closed Hi-Hat',  gen: (sr) => this._synthClosedHiHat(sr) },
+            { name: 'Open Hi-Hat',    gen: (sr) => this._synthOpenHiHat(sr) },
+            { name: 'Rimshot',        gen: (sr) => this._synthRimshot(sr) },
+            { name: 'Crash Cymbal',   gen: (sr) => this._synthCrash(sr) },
+            { name: 'Shaker',         gen: (sr) => this._synthShaker(sr) },
+        ];
+
+        for (let i = 0; i < drums.length; i++) {
+            // Skip if track already has a sample loaded
+            if (this.trackSamples[i].buffer) continue;
+
+            try {
+                const audioBuffer = drums[i].gen(sampleRate);
+                this.trackSamples[i] = {
+                    buffer: audioBuffer,
+                    name: drums[i].name,
+                    fileHandle: null,
+                    gain: 1.0,
+                    pitch: 1.0,
+                    startOffset: 0,
+                    endOffset: 1,
+                    waveformData: this.generateWaveformData(audioBuffer),
+                    adsr: { attack: 0.001, decay: 0.05, sustain: 1.0, release: 0.01 }
+                };
+                console.log(`[AudioEngine] Built-in "${drums[i].name}" → Track ${i + 1}`);
+            } catch (err) {
+                console.error(`[AudioEngine] Failed to generate ${drums[i].name}:`, err);
+            }
+        }
+    }
+
+    // ── Helper: create white noise buffer ──
+    _noiseBuffer(sampleRate, duration) {
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < length; i++) {
+            data[i] = Math.random() * 2 - 1;
+        }
+        return buffer;
+    }
+
+    // ── Helper: render a synthesis function offline into an AudioBuffer ──
+    _renderOffline(sampleRate, duration, setupFn) {
+        const length = Math.floor(sampleRate * duration);
+        const offline = new OfflineAudioContext(1, length, sampleRate);
+        setupFn(offline, duration);
+        // OfflineAudioContext.startRendering() returns a promise
+        // But we build the buffer synchronously from raw math for reliability
+        // Use direct sample generation instead
+        return null; // overridden by direct generation below
+    }
+
+    // ── Direct buffer generation (no OfflineAudioContext needed) ──
+
+    _synthKick(sampleRate) {
+        const duration = 0.5;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // Pitch sweep: 150Hz → 40Hz exponential decay
+            const freq = 40 + 110 * Math.exp(-t * 30);
+            // Phase accumulation for smooth pitch sweep
+            const phase = 2 * Math.PI * (40 * t + (110 / 30) * (1 - Math.exp(-t * 30)));
+            // Sine body with amplitude decay
+            const body = Math.sin(phase) * Math.exp(-t * 7);
+            // Sub click at the start
+            const click = Math.sin(2 * Math.PI * 160 * t) * Math.exp(-t * 40) * 0.7;
+            // Combine
+            data[i] = Math.max(-1, Math.min(1, (body * 0.9 + click) * 0.95));
+        }
+
+        return buffer;
+    }
+
+    _synthSnare(sampleRate) {
+        const duration = 0.3;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // Tone body: 180Hz sine, fast decay
+            const body = Math.sin(2 * Math.PI * 180 * t) * Math.exp(-t * 20) * 0.5;
+            // Noise snare wires: filtered noise with medium decay
+            const noise = (Math.random() * 2 - 1) * Math.exp(-t * 12) * 0.6;
+            // Snap transient
+            const snap = Math.sin(2 * Math.PI * 330 * t) * Math.exp(-t * 50) * 0.3;
+            data[i] = Math.max(-1, Math.min(1, body + noise + snap));
+        }
+
+        return buffer;
+    }
+
+    _synthClap(sampleRate) {
+        const duration = 0.3;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        // Clap = multiple short noise bursts followed by a decaying noise tail
+        const burstTimes = [0, 0.01, 0.02, 0.035]; // 4 micro-bursts
+        const burstDuration = 0.008;
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            let sample = 0;
+
+            // Micro-bursts (initial "clap" attack)
+            for (const bt of burstTimes) {
+                const dt = t - bt;
+                if (dt >= 0 && dt < burstDuration) {
+                    const burstEnv = Math.exp(-dt * 200);
+                    sample += (Math.random() * 2 - 1) * burstEnv * 0.5;
+                }
+            }
+
+            // Noise tail (band-pass-ish via simple filtering)
+            if (t > 0.03) {
+                const tail = (Math.random() * 2 - 1) * Math.exp(-(t - 0.03) * 15) * 0.55;
+                sample += tail;
+            }
+
+            data[i] = Math.max(-1, Math.min(1, sample));
+        }
+
+        return buffer;
+    }
+
+    _synthClosedHiHat(sampleRate) {
+        const duration = 0.08;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // Metallic tones: sum of high-frequency square-ish harmonics
+            const metallic = (
+                Math.sin(2 * Math.PI * 3500 * t) * 0.3 +
+                Math.sin(2 * Math.PI * 5100 * t) * 0.25 +
+                Math.sin(2 * Math.PI * 7200 * t) * 0.2 +
+                Math.sin(2 * Math.PI * 8900 * t) * 0.15 +
+                Math.sin(2 * Math.PI * 10800 * t) * 0.1
+            );
+            // Noise component
+            const noise = (Math.random() * 2 - 1) * 0.4;
+            // Very fast decay envelope
+            const env = Math.exp(-t * 80);
+            data[i] = Math.max(-1, Math.min(1, (metallic + noise) * env * 0.8));
+        }
+
+        return buffer;
+    }
+
+    _synthOpenHiHat(sampleRate) {
+        const duration = 0.5;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // Same metallic ratios as closed hat, but longer decay
+            const metallic = (
+                Math.sin(2 * Math.PI * 3500 * t) * 0.3 +
+                Math.sin(2 * Math.PI * 5100 * t) * 0.25 +
+                Math.sin(2 * Math.PI * 7200 * t) * 0.2 +
+                Math.sin(2 * Math.PI * 8900 * t) * 0.15 +
+                Math.sin(2 * Math.PI * 10800 * t) * 0.1
+            );
+            // Noise component
+            const noise = (Math.random() * 2 - 1) * 0.45;
+            // Slower decay for open hat character
+            const env = Math.exp(-t * 6);
+            data[i] = Math.max(-1, Math.min(1, (metallic + noise) * env * 0.7));
+        }
+
+        return buffer;
+    }
+
+    _synthRimshot(sampleRate) {
+        const duration = 0.12;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // High-pitched tone body
+            const tone = Math.sin(2 * Math.PI * 820 * t) * Math.exp(-t * 35) * 0.6;
+            // Secondary harmonic
+            const harm = Math.sin(2 * Math.PI * 1640 * t) * Math.exp(-t * 45) * 0.3;
+            // Click transient
+            const click = (Math.random() * 2 - 1) * Math.exp(-t * 100) * 0.5;
+            data[i] = Math.max(-1, Math.min(1, tone + harm + click));
+        }
+
+        return buffer;
+    }
+
+    _synthCrash(sampleRate) {
+        const duration = 1.5;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // Wide-band metallic shimmer
+            const metallic = (
+                Math.sin(2 * Math.PI * 2400 * t + Math.sin(t * 1200) * 0.5) * 0.2 +
+                Math.sin(2 * Math.PI * 3800 * t + Math.sin(t * 2400) * 0.3) * 0.2 +
+                Math.sin(2 * Math.PI * 5600 * t) * 0.15 +
+                Math.sin(2 * Math.PI * 7100 * t) * 0.1 +
+                Math.sin(2 * Math.PI * 9300 * t) * 0.08
+            );
+            // Noise — dominant in crash
+            const noise = (Math.random() * 2 - 1) * 0.55;
+            // Two-stage envelope: fast initial hit, then long shimmer decay
+            const envAttack = Math.min(1, t / 0.002); // 2ms attack ramp
+            const envBody = Math.exp(-t * 3);
+            const env = envAttack * envBody;
+            data[i] = Math.max(-1, Math.min(1, (metallic + noise) * env * 0.75));
+        }
+
+        return buffer;
+    }
+
+    _synthShaker(sampleRate) {
+        const duration = 0.15;
+        const length = Math.floor(sampleRate * duration);
+        const buffer = this.audioContext.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < length; i++) {
+            const t = i / sampleRate;
+            // High-pass filtered noise effect via differentiated noise
+            const noise = Math.random() * 2 - 1;
+            // Granular texture: amplitude modulation at ~200Hz for "shh" texture
+            const grain = 0.6 + 0.4 * Math.sin(2 * Math.PI * 200 * t);
+            // Envelope: quick swell then decay
+            const env = Math.sin(Math.PI * t / duration) * Math.exp(-t * 15);
+            data[i] = Math.max(-1, Math.min(1, noise * grain * env * 0.65));
+        }
+
+        return buffer;
+    }
 }
 
 // Export as global

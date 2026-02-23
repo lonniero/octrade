@@ -141,8 +141,8 @@ class RhodesSynth {
         ampEnv.gain.linearRampToValueAtTime(vel * 0.5, now + 0.005);
         // Decay to sustain
         ampEnv.gain.exponentialRampToValueAtTime(vel * 0.22, now + 0.3);
-        // Slow sustain decay
-        ampEnv.gain.exponentialRampToValueAtTime(vel * 0.12, now + 3.0);
+        // Long sustain — holds for as long as pad is pressed
+        ampEnv.gain.exponentialRampToValueAtTime(vel * 0.08, now + 8.0);
 
         carrier.connect(ampEnv);
 
@@ -193,13 +193,13 @@ class RhodesSynth {
 
         const now = this.ctx.currentTime;
 
-        // Quick release
+        // Warm release tail (~0.5s)
         voice.ampEnv.gain.cancelScheduledValues(now);
         voice.ampEnv.gain.setValueAtTime(voice.ampEnv.gain.value, now);
-        voice.ampEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        voice.ampEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
 
         // Stop oscillators after release
-        const stopTime = now + 0.35;
+        const stopTime = now + 0.55;
         voice.carrier.stop(stopTime);
         voice.modulator.stop(stopTime);
         voice.mod2.stop(stopTime);

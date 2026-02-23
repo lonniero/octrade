@@ -157,6 +157,68 @@
         triad: 'Triad',
     };
 
+    // ──────────────────────────────────────────────
+    // RING QUALITY MODIFIERS — small ring pad labels
+    // ──────────────────────────────────────────────
+
+    const RING_QUALITY_MODIFIERS = [
+        { key: '7th', label: '7th', desc: 'Default 7th voicing' },
+        { key: '9th', label: '9th', desc: 'Add the 9th — neo-soul staple' },
+        { key: '11th', label: '11th', desc: 'Ethereal, open sound' },
+        { key: '13th', label: '13th', desc: 'Full, rich voicing' },
+        { key: 'sus4', label: 'sus4', desc: 'Suspended — gospel floater' },
+        { key: 'add9', label: 'add9', desc: 'Triad + 9th, no 7th' },
+        { key: '69', label: '6/9', desc: 'Smooth — D\'Angelo territory' },
+        { key: 'triad', label: 'triad', desc: 'Strip to basic triad' },
+    ];
+
+    /**
+     * Upgrade a base chord quality using the active modifier.
+     * E.g. min7 + '9th' → min9, dom7 + '13th' → dom13
+     * Returns the original quality if no valid upgrade exists.
+     */
+    function applyQualityModifier(baseQuality, modifierKey) {
+        if (!modifierKey || modifierKey === '7th') return baseQuality;
+
+        // Determine the chord family from the base quality
+        const family = QUALITY_FAMILY[baseQuality] || 'major';
+
+        const UPGRADE_MAP = {
+            '9th': {
+                major: 'maj9', minor: 'min9', dominant: 'dom9',
+                diminished: 'min9b5', augmented: 'maj9', sus: baseQuality,
+            },
+            '11th': {
+                major: 'maj11', minor: 'min11', dominant: 'dom11',
+                diminished: 'min11', augmented: 'maj11', sus: baseQuality,
+            },
+            '13th': {
+                major: 'maj13', minor: 'min13', dominant: 'dom13',
+                diminished: 'min13', augmented: 'maj13', sus: baseQuality,
+            },
+            'sus4': {
+                major: 'sus4', minor: 'sus4', dominant: 'sus4',
+                diminished: baseQuality, augmented: baseQuality, sus: 'sus4',
+            },
+            'add9': {
+                major: 'maj9', minor: 'min9', dominant: 'dom9',
+                diminished: baseQuality, augmented: 'maj9', sus: baseQuality,
+            },
+            '69': {
+                major: 'maj13', minor: 'min13', dominant: 'dom13',
+                diminished: baseQuality, augmented: 'maj13', sus: baseQuality,
+            },
+            'triad': {
+                major: 'maj', minor: 'min', dominant: 'maj',
+                diminished: 'dim', augmented: 'aug', sus: 'sus4',
+            },
+        };
+
+        const map = UPGRADE_MAP[modifierKey];
+        if (!map) return baseQuality;
+        return map[family] || baseQuality;
+    }
+
     // Voice ranges (MIDI note numbers)
     const VOICE_RANGES = {
         bass: { low: 28, high: 55 },   // E1 to G3
@@ -269,51 +331,53 @@
      * @param {number} octaveOffset - Octave shift (-2 to +2)
      * @returns {number[]} MIDI note numbers, sorted low to high
      */
-    function voiceChord(root, quality, voicingType, prevVoicing, octaveOffset) {
+    function voiceChord(root, quality, voicingType, prevVoicing, octaveOffset, prevRoot) {
         const intervals = CHORD_INTERVALS[quality];
         if (!intervals) return [];
 
         // Normalize prevVoicing — null/undefined on first press
         if (!prevVoicing) prevVoicing = [];
+        // Normalize prevRoot — default to 0 if not provided
+        if (prevRoot === undefined || prevRoot === null) prevRoot = 0;
 
         let notes;
 
         switch (voicingType) {
             case 'close':
-                notes = voiceClose(root, intervals, prevVoicing);
+                notes = voiceClose(root, intervals, prevVoicing, prevRoot);
                 break;
             case 'drop2':
-                notes = voiceDrop2(root, intervals, prevVoicing);
+                notes = voiceDrop2(root, intervals, prevVoicing, prevRoot);
                 break;
             case 'drop3':
-                notes = voiceDrop3(root, intervals, prevVoicing);
+                notes = voiceDrop3(root, intervals, prevVoicing, prevRoot);
                 break;
             case 'open':
-                notes = voiceOpen(root, intervals, prevVoicing);
+                notes = voiceOpen(root, intervals, prevVoicing, prevRoot);
                 break;
             case 'rootlessA':
-                notes = voiceRootless(root, intervals, prevVoicing, 'A');
+                notes = voiceRootless(root, intervals, prevVoicing, 'A', prevRoot);
                 break;
             case 'rootlessB':
-                notes = voiceRootless(root, intervals, prevVoicing, 'B');
+                notes = voiceRootless(root, intervals, prevVoicing, 'B', prevRoot);
                 break;
             case 'quartal':
-                notes = voiceQuartal(root, intervals, prevVoicing);
+                notes = voiceQuartal(root, intervals, prevVoicing, prevRoot);
                 break;
             case 'triad':
-                notes = voiceTriad(root, quality, prevVoicing);
+                notes = voiceTriad(root, quality, prevVoicing, prevRoot);
                 break;
             default:
-                notes = voiceClose(root, intervals, prevVoicing);
+                notes = voiceClose(root, intervals, prevVoicing, prevRoot);
         }
 
         // ── Centroid gravity correction ──
         // Prevents voice leading drift when circling through keys.
         // If the chord's average pitch drifts outside the sweet zone,
         // shift the ENTIRE voicing by octave(s) to pull it back.
-        const GRAVITY_LOW = 46;  // Bb2 — below this, push up
-        const GRAVITY_HIGH = 70;  // Bb4 — above this, push down
-        const GRAVITY_TARGET = DEFAULT_CENTER; // F#3 = 54
+        const GRAVITY_LOW = 48;  // C3 — below this, push up
+        const GRAVITY_HIGH = 66;  // F#4 — above this, push down
+        const GRAVITY_TARGET = 57; // A3 — keyboard sweet spot
 
         if (notes.length > 0) {
             const centroid = notes.reduce((a, b) => a + b, 0) / notes.length;
@@ -338,31 +402,47 @@
         notes = clampToRange(notes, 28, 84); // E1 to C6
 
         notes.sort((a, b) => a - b);
+
+        // ── Max-spread check ──
+        // If bass-to-next-voice gap exceeds 19 semitones (octave + P5),
+        // push bass up an octave to tighten the voicing.
+        if (notes.length >= 2) {
+            const bassUpperGap = notes[1] - notes[0];
+            if (bassUpperGap > 19 && notes[0] + 12 < notes[1]) {
+                notes[0] += 12;
+                notes.sort((a, b) => a - b);
+            }
+        }
+
         return notes;
     }
 
     /**
      * Close position: all notes within one octave, stacked up from root.
      */
-    function voiceClose(root, intervals, prevVoicing) {
-        const center = prevVoicing.length > 0
-            ? Math.round(prevVoicing.reduce((a, b) => a + b, 0) / prevVoicing.length)
-            : DEFAULT_CENTER;
+    function voiceClose(root, intervals, prevVoicing, prevRoot) {
+        const prevBass = prevVoicing.length > 0 ? Math.min(...prevVoicing) : 0;
 
-        // Build close-position chord centered around the previous chord's center
-        const notes = [];
-        const bassNote = findClosest(root, center - 6);
-        notes.push(bassNote);
+        // Bass voice: independent movement
+        const bass = voiceLeadBass(root, prevBass);
 
+        // Upper voices: close position stacked above bass
+        const upperPCs = [];
         for (let i = 1; i < intervals.length && i < 5; i++) {
-            const pc = (root + intervals[i]) % 12;
-            const above = findNextAbove(pc, notes[notes.length - 1]);
-            notes.push(above);
+            upperPCs.push((root + intervals[i]) % 12);
         }
 
-        // Voice lead to previous if available
-        if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(notes, prevVoicing);
+        if (prevVoicing.length > 1) {
+            // Voice lead upper voices naturally (exclude bass from prev)
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            return [bass, ...ledUpper].sort((a, b) => a - b);
+        }
+
+        // No previous voicing — build from scratch
+        const notes = [bass];
+        for (const pc of upperPCs) {
+            notes.push(findNextAbove(pc, notes[notes.length - 1]));
         }
         return notes;
     }
@@ -371,11 +451,17 @@
      * Drop 2: close position, then drop the second-from-top note an octave.
      * Classic jazz piano voicing with wide bass interval.
      */
-    function voiceDrop2(root, intervals, prevVoicing) {
+    function voiceDrop2(root, intervals, prevVoicing, prevRoot) {
         // First build close position (use 4 notes max)
         const close = buildClosePosition(root, intervals, prevVoicing, 4);
 
-        if (close.length < 4) return voiceLeadSmooth(close, prevVoicing);
+        if (close.length < 4) {
+            if (prevVoicing.length > 0) {
+                const pcs = close.map(n => ((n % 12) + 12) % 12);
+                return voiceLeadNatural(pcs, prevVoicing, prevRoot || 0);
+            }
+            return close;
+        }
 
         // Drop the 2nd from top note down an octave
         close.sort((a, b) => a - b);
@@ -384,7 +470,13 @@
         close.sort((a, b) => a - b);
 
         if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(close, prevVoicing);
+            // Bass: independent, upper: natural
+            const prevBass = Math.min(...prevVoicing);
+            const bass = voiceLeadBass(root, prevBass);
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const upperPCs = close.slice(1).map(n => ((n % 12) + 12) % 12);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            return [bass, ...ledUpper].sort((a, b) => a - b);
         }
         return close;
     }
@@ -393,10 +485,16 @@
      * Drop 3: close position, then drop the third-from-top note an octave.
      * Wide, warm voicing for ballads.
      */
-    function voiceDrop3(root, intervals, prevVoicing) {
+    function voiceDrop3(root, intervals, prevVoicing, prevRoot) {
         const close = buildClosePosition(root, intervals, prevVoicing, 4);
 
-        if (close.length < 4) return voiceLeadSmooth(close, prevVoicing);
+        if (close.length < 4) {
+            if (prevVoicing.length > 0) {
+                const pcs = close.map(n => ((n % 12) + 12) % 12);
+                return voiceLeadNatural(pcs, prevVoicing, prevRoot || 0);
+            }
+            return close;
+        }
 
         close.sort((a, b) => a - b);
         const thirdFromTop = close[close.length - 3];
@@ -404,7 +502,12 @@
         close.sort((a, b) => a - b);
 
         if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(close, prevVoicing);
+            const prevBass = Math.min(...prevVoicing);
+            const bass = voiceLeadBass(root, prevBass);
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const upperPCs = close.slice(1).map(n => ((n % 12) + 12) % 12);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            return [bass, ...ledUpper].sort((a, b) => a - b);
         }
         return close;
     }
@@ -413,42 +516,45 @@
      * Open: spread voices across full range with proper bass-soprano counterpoint.
      * Gospel/neo-soul style — big, full sound.
      */
-    function voiceOpen(root, intervals, prevVoicing) {
+    function voiceOpen(root, intervals, prevVoicing, prevRoot) {
         const noteCount = Math.min(intervals.length, 5);
-        const notes = [];
 
-        // Bass: root in low register
-        const bassCenter = prevVoicing.length > 0 ? prevVoicing[0] : 40; // around E2
-        const bass = findClosest(root, bassCenter);
-        notes.push(clampNote(bass, 28, 48)); // E1 to C3
+        // Bass: independent voice leading  
+        const prevBass = prevVoicing.length > 0 ? Math.min(...prevVoicing) : 0;
+        const bass = voiceLeadBass(root, prevBass);
 
         // Upper structure: spread remaining notes across alto-soprano range
-        const upperIntervals = intervals.slice(1, noteCount);
-        const upperCenter = prevVoicing.length > 0
-            ? Math.round(prevVoicing.slice(1).reduce((a, b) => a + b, 0) / Math.max(1, prevVoicing.length - 1))
-            : 64; // E4
-
-        for (let i = 0; i < upperIntervals.length; i++) {
-            const pc = (root + upperIntervals[i]) % 12;
-            const target = upperCenter - 6 + (i * 5); // spread ~5 semitones apart
-            const note = findClosest(pc, target);
-            notes.push(clampNote(note, 48, 84)); // C3 to C6
+        const upperPCs = [];
+        for (let i = 1; i < noteCount; i++) {
+            upperPCs.push((root + intervals[i]) % 12);
         }
 
-        if (prevVoicing.length > 0) {
-            return applyCounterpoint(notes, prevVoicing);
+        if (prevVoicing.length > 1) {
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            // Ensure upper voices stay in upper register
+            const clampedUpper = ledUpper.map(n => clampNote(n, 48, 84));
+            return [bass, ...clampedUpper].sort((a, b) => a - b);
         }
-        return notes;
+
+        // No previous — build spread voicing from scratch
+        const notes = [bass];
+        const upperCenter = 62; // D4
+        for (let i = 0; i < upperPCs.length; i++) {
+            const target = upperCenter - 4 + (i * 5);
+            notes.push(clampNote(findClosest(upperPCs[i], target), 48, 84));
+        }
+        return notes.sort((a, b) => a - b);
     }
 
     /**
      * Rootless voicing: omit the root, voice the upper structure.
      * Type A: 3-5-7-9 | Type B: 7-9-3-5
      */
-    function voiceRootless(root, intervals, prevVoicing, type) {
+    function voiceRootless(root, intervals, prevVoicing, type, prevRoot) {
         if (intervals.length < 4) {
             // Too few notes for rootless — fall back to close
-            return voiceClose(root, intervals, prevVoicing);
+            return voiceClose(root, intervals, prevVoicing, prevRoot);
         }
 
         const pcs = intervals.map(i => (root + i) % 12);
@@ -464,20 +570,19 @@
             if (pcs.length > 2) voicePCs.push(pcs[2]);
         }
 
-        const center = prevVoicing.length > 0
-            ? Math.round(prevVoicing.reduce((a, b) => a + b, 0) / prevVoicing.length)
-            : DEFAULT_CENTER;
+        if (prevVoicing.length > 0) {
+            // Rootless = no bass voice, all voices led naturally
+            return voiceLeadNatural(voicePCs, prevVoicing, prevRoot || 0);
+        }
 
+        // No previous — build from scratch
+        const center = DEFAULT_CENTER;
         const notes = [];
         let current = center - 6;
         for (const pc of voicePCs) {
             const note = findClosest(pc, current);
             notes.push(note);
-            current = note + 3; // space out
-        }
-
-        if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(notes, prevVoicing);
+            current = note + 3;
         }
         return notes;
     }
@@ -486,40 +591,49 @@
      * Quartal voicing: stack notes in 4ths from the root.
      * McCoy Tyner / Herbie Hancock modal jazz sound.
      */
-    function voiceQuartal(root, intervals, prevVoicing) {
+    function voiceQuartal(root, intervals, prevVoicing, prevRoot) {
         const pcs = intervals.map(i => (root + i) % 12);
-        const center = prevVoicing.length > 0
-            ? Math.round(prevVoicing.reduce((a, b) => a + b, 0) / prevVoicing.length)
-            : DEFAULT_CENTER;
 
-        // Build quartal stack: root, then up in 4ths (5 semitones)
-        // but use chord tones when possible
-        const notes = [];
-        let bassNote = findClosest(root, center - 10);
-        notes.push(bassNote);
+        // Bass: independent
+        const prevBass = prevVoicing.length > 0 ? Math.min(...prevVoicing) : 0;
+        const bass = voiceLeadBass(root, prevBass);
 
-        // Stack 4ths, snapping to nearest chord tone for color
-        for (let i = 1; i < 4; i++) {
-            const quartalTarget = notes[notes.length - 1] + 5; // perfect 4th up
-            const pc = quartalTarget % 12;
-            // Find the chord tone closest to this quartal target
-            let bestPC = pc;
+        // Build quartal stack for upper voices
+        // Stack chord tones in 4ths above bass
+        const upperPCs = [];
+        let quartalMidi = bass + 5; // start a 4th above bass
+        for (let i = 0; i < 3; i++) {
+            const targetPC = quartalMidi % 12;
+            // Snap to nearest chord tone
+            let bestPC = targetPC;
             let bestDist = 99;
             for (const chordPC of pcs) {
                 const dist = Math.min(
-                    Math.abs(chordPC - pc),
-                    12 - Math.abs(chordPC - pc)
+                    Math.abs(chordPC - targetPC),
+                    12 - Math.abs(chordPC - targetPC)
                 );
                 if (dist < bestDist) {
                     bestDist = dist;
                     bestPC = chordPC;
                 }
             }
-            notes.push(findClosest(bestPC, quartalTarget));
+            upperPCs.push(bestPC);
+            quartalMidi += 5; // next 4th
         }
 
-        if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(notes, prevVoicing);
+        if (prevVoicing.length > 1) {
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            return [bass, ...ledUpper].sort((a, b) => a - b);
+        }
+
+        // No previous — build from scratch
+        const notes = [bass];
+        let current = bass;
+        for (const pc of upperPCs) {
+            const note = findNextAbove(pc, current);
+            notes.push(note);
+            current = note;
         }
         return notes;
     }
@@ -528,7 +642,7 @@
      * Triad voicing: simple 3-note chord.
      * Uses the base triad quality from the chord.
      */
-    function voiceTriad(root, quality, prevVoicing) {
+    function voiceTriad(root, quality, prevVoicing, prevRoot) {
         // Map quality to base triad
         let triadQ = 'maj';
         if (quality.startsWith('min') || quality === 'halfdim7') triadQ = 'min';
@@ -540,21 +654,26 @@
 
         const intervals = CHORD_INTERVALS[triadQ] || CHORD_INTERVALS.maj;
 
-        const center = prevVoicing.length > 0
-            ? Math.round(prevVoicing.reduce((a, b) => a + b, 0) / prevVoicing.length)
-            : DEFAULT_CENTER;
+        // Bass: independent
+        const prevBass = prevVoicing.length > 0 ? Math.min(...prevVoicing) : 0;
+        const bass = voiceLeadBass(root, prevBass);
 
-        const notes = [];
-        const bass = findClosest(root, center - 4);
-        notes.push(bass);
-
+        // Upper voices (just 2 for a triad)
+        const upperPCs = [];
         for (let i = 1; i < intervals.length; i++) {
-            const pc = (root + intervals[i]) % 12;
-            notes.push(findNextAbove(pc, notes[notes.length - 1]));
+            upperPCs.push((root + intervals[i]) % 12);
         }
 
-        if (prevVoicing.length > 0) {
-            return voiceLeadSmooth(notes, prevVoicing);
+        if (prevVoicing.length > 1) {
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
+            return [bass, ...ledUpper].sort((a, b) => a - b);
+        }
+
+        // No previous — build from scratch
+        const notes = [bass];
+        for (const pc of upperPCs) {
+            notes.push(findNextAbove(pc, notes[notes.length - 1]));
         }
         return notes;
     }
@@ -562,6 +681,19 @@
     // ──────────────────────────────────────────────
     // VOICE LEADING HELPERS
     // ──────────────────────────────────────────────
+
+    /**
+     * Tendency tone resolution table.
+     * Maps interval-from-chord-root → preferred resolution in semitones.
+     * Negative = resolve down, positive = resolve up.
+     */
+    const TENDENCY_RESOLUTIONS = {
+        10: -1,  // b7 resolves DOWN by half-step (e.g. Bb → A over G7 → C)
+        11: -1,  // maj7 resolves DOWN by half-step in most contexts
+        6: -1,  // tritone/b5 resolves DOWN (e.g. Db → C over G7 → C)
+        1: -1,  // b9 resolves DOWN
+        8: 1,  // #5/b13 resolves UP
+    };
 
     /**
      * Build a close-position chord centered near the previous voicing.
@@ -585,33 +717,80 @@
     }
 
     /**
-     * Smooth voice leading: move each voice to the nearest available chord tone.
-     * Minimizes total voice movement while preventing voice crossings.
+     * Natural voice leading: mimics how a pianist moves between chords.
+     *
+     * Priority order:
+     *   1. Common tones — shared pitch classes stay at exact same MIDI note
+     *   2. Tendency tones — 7ths resolve down, tritones resolve, etc.
+     *   3. Stepwise motion — remaining voices move by smallest interval possible
+     *
+     * @param {number[]} newPCs - Pitch classes to place (0-11)
+     * @param {number[]} prevVoicing - Previous chord's MIDI notes (sorted low→high)
+     * @param {number} prevRoot - Previous chord's root pitch class (for tendency detection)
+     * @returns {number[]} MIDI notes, sorted low→high
      */
-    function voiceLeadSmooth(newNotes, prevNotes) {
-        if (prevNotes.length === 0) return newNotes;
+    function voiceLeadNatural(newPCs, prevVoicing, prevRoot) {
+        if (prevVoicing.length === 0) return newPCs; // no prev = nothing to lead from
 
-        // Get the pitch classes we need to place
-        const newPCs = newNotes.map(n => n % 12);
-        const sortedPrev = [...prevNotes].sort((a, b) => a - b);
-        const matchCount = Math.min(sortedPrev.length, newPCs.length);
+        const sortedPrev = [...prevVoicing].sort((a, b) => a - b);
+        const targetPCs = new Set(newPCs.map(pc => ((pc % 12) + 12) % 12));
+        const placedPCs = new Set();       // PCs we've assigned to a voice
+        const result = new Array(sortedPrev.length).fill(null);
 
-        // For each prev voice (sorted low to high), find the closest
-        // octave placement of each available pitch class
-        const usedPCIndices = new Set();
-        const result = [];
+        // ── Step 1: Common-tone retention ──
+        // If a previous voice's pitch class is in the new chord, keep it
+        for (let i = 0; i < sortedPrev.length; i++) {
+            const prevPC = ((sortedPrev[i] % 12) + 12) % 12;
+            if (targetPCs.has(prevPC) && !placedPCs.has(prevPC)) {
+                result[i] = sortedPrev[i]; // exact same MIDI note — finger doesn't move
+                placedPCs.add(prevPC);
+            }
+        }
 
-        for (let i = 0; i < matchCount; i++) {
+        // ── Step 2: Tendency-tone resolution ──
+        // For unplaced voices, check if they're tendency tones that should resolve
+        for (let i = 0; i < sortedPrev.length; i++) {
+            if (result[i] !== null) continue; // already placed
+
             const prevNote = sortedPrev[i];
+            const prevPC = ((prevNote % 12) + 12) % 12;
+
+            // What interval is this voice relative to the previous chord's root?
+            const intervalFromPrevRoot = ((prevPC - prevRoot) % 12 + 12) % 12;
+            const resolution = TENDENCY_RESOLUTIONS[intervalFromPrevRoot];
+
+            if (resolution !== undefined) {
+                const resolvedNote = prevNote + resolution;
+                const resolvedPC = ((resolvedNote % 12) + 12) % 12;
+
+                // Only resolve if the target PC is actually in the new chord
+                if (targetPCs.has(resolvedPC) && !placedPCs.has(resolvedPC)) {
+                    result[i] = resolvedNote;
+                    placedPCs.add(resolvedPC);
+                }
+            }
+        }
+
+        // ── Step 3: Stepwise motion for remaining voices ──
+        // Unplaced new PCs get assigned to unplaced prev voices by smallest motion
+        const unplacedNewPCs = [...targetPCs].filter(pc => !placedPCs.has(pc));
+        const unplacedVoiceIndices = [];
+        for (let i = 0; i < result.length; i++) {
+            if (result[i] === null) unplacedVoiceIndices.push(i);
+        }
+
+        // Greedy assignment: for each unplaced voice, find the closest unplaced PC
+        const usedNewPCs = new Set();
+        for (const voiceIdx of unplacedVoiceIndices) {
+            const prevNote = sortedPrev[voiceIdx];
             let bestNote = null;
             let bestDist = Infinity;
-            let bestPCIdx = 0;
+            let bestPC = null;
 
-            for (let j = 0; j < newPCs.length; j++) {
-                if (usedPCIndices.has(j)) continue;
-                const pc = newPCs[j];
+            for (const pc of unplacedNewPCs) {
+                if (usedNewPCs.has(pc)) continue;
 
-                // Find closest octave placement of this pitch class to the prev note
+                // Find closest octave placement
                 const octave = Math.floor(prevNote / 12);
                 const candidates = [
                     (octave - 1) * 12 + pc,
@@ -625,75 +804,105 @@
                     if (dist < bestDist) {
                         bestDist = dist;
                         bestNote = c;
-                        bestPCIdx = j;
+                        bestPC = pc;
                     }
                 }
             }
 
             if (bestNote !== null) {
-                result.push(bestNote);
-                usedPCIndices.add(bestPCIdx);
+                result[voiceIdx] = bestNote;
+                usedNewPCs.add(bestPC);
             }
         }
 
-        // Any extra notes from the new chord (if new chord has more voices)
-        for (let i = 0; i < newPCs.length; i++) {
-            if (!usedPCIndices.has(i)) {
-                result.push(newNotes[i]);
+        // Fill any remaining null slots (voice count mismatch)
+        for (let i = 0; i < result.length; i++) {
+            if (result[i] === null) {
+                result[i] = sortedPrev[i]; // fallback: keep prev note
             }
         }
 
-        // Sort to prevent voice crossings
+        // Handle case where new chord has MORE voices than previous
+        if (newPCs.length > sortedPrev.length) {
+            const extraPCs = unplacedNewPCs.filter(pc => !usedNewPCs.has(pc));
+            const center = Math.round(sortedPrev.reduce((a, b) => a + b, 0) / sortedPrev.length);
+            for (const pc of extraPCs) {
+                result.push(findClosest(pc, center));
+            }
+        }
+
         result.sort((a, b) => a - b);
         return result;
     }
 
     /**
-     * Apply bass-soprano counterpoint rules.
-     * Bass and soprano should move in contrary or oblique motion.
+     * Independent bass voice leading.
+     * A pianist's left hand moves differently from the right:
+     *   - Prefers root motion by 4th/5th (strongest), then step, then 3rd
+     *   - Keeps bass in a focused low register (C2–G3)
+     *   - Places root unless voicing type says otherwise
+     *
+     * @param {number} newRoot - New chord root pitch class
+     * @param {number} prevBass - Previous bass MIDI note (or 0 if none)
+     * @returns {number} MIDI note for bass voice
      */
-    function applyCounterpoint(newNotes, prevNotes) {
-        if (prevNotes.length < 2 || newNotes.length < 2) return newNotes;
+    function voiceLeadBass(newRoot, prevBass) {
+        const BASS_LOW = 40;   // E2
+        const BASS_HIGH = 60;  // C4
+        const BASS_CENTER = 48; // C3 — piano left-hand sweet spot
 
-        const sorted = [...newNotes].sort((a, b) => a - b);
-        const prevSorted = [...prevNotes].sort((a, b) => a - b);
+        if (!prevBass || prevBass === 0) {
+            return findClosest(newRoot, BASS_CENTER);
+        }
 
-        const prevBass = prevSorted[0];
-        const prevSoprano = prevSorted[prevSorted.length - 1];
-
-        let bass = sorted[0];
-        let soprano = sorted[sorted.length - 1];
-
-        // Check if both move in same direction (parallel) — try to fix
-        const bassMotion = bass - prevBass;
-        const sopranoMotion = soprano - prevSoprano;
-
-        if (bassMotion > 0 && sopranoMotion > 0) {
-            // Both moving up — try moving soprano down an octave
-            const altSoprano = soprano - 12;
-            if (altSoprano > bass && altSoprano >= 48) {
-                sorted[sorted.length - 1] = altSoprano;
+        // Find all valid placements of the new root in bass range
+        const candidates = [];
+        for (let oct = 1; oct <= 5; oct++) {
+            const note = oct * 12 + newRoot;
+            if (note >= BASS_LOW && note <= BASS_HIGH) {
+                candidates.push(note);
             }
-        } else if (bassMotion < 0 && sopranoMotion < 0) {
-            // Both moving down — try moving bass up an octave
-            const altBass = bass + 12;
-            if (altBass < soprano && altBass <= 55) {
-                sorted[0] = altBass;
+        }
+        if (candidates.length === 0) {
+            return findClosest(newRoot, BASS_CENTER);
+        }
+
+        // Score each candidate: prefer small motion, especially by 4th/5th
+        let bestNote = candidates[0];
+        let bestScore = Infinity;
+
+        for (const c of candidates) {
+            const motion = Math.abs(c - prevBass);
+            const interval = motion % 12;
+
+            // Scoring: lower is better
+            // Perfect 4th/5th (5 or 7 semitones) = most natural bass motion
+            // Step (1-2) = smooth
+            // Minor/major 3rd (3-4) = acceptable
+            // Tritone (6) = dramatic but OK
+            // Others = less ideal
+            let score = motion; // base: total distance
+            if (interval === 5 || interval === 7) score -= 3;  // reward 4th/5th
+            if (interval <= 2) score -= 2;                      // reward step
+            if (interval === 0) score -= 4;                     // reward common tone (oblique bass)
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestNote = c;
             }
         }
 
-        // Now voice lead the inner voices smoothly
-        if (sorted.length > 2) {
-            const innerNew = sorted.slice(1, -1);
-            const innerPrev = prevSorted.slice(1, -1);
-            const ledInner = voiceLeadSmooth(innerNew, innerPrev);
-            for (let i = 0; i < ledInner.length; i++) {
-                sorted[i + 1] = ledInner[i];
-            }
-        }
+        return bestNote;
+    }
 
-        sorted.sort((a, b) => a - b);
-        return sorted;
+    /**
+     * Legacy wrapper — calls voiceLeadNatural with no tendency info.
+     * Used by voicing functions that don't track the previous root.
+     */
+    function voiceLeadSmooth(newNotes, prevNotes) {
+        if (prevNotes.length === 0) return newNotes;
+        const newPCs = newNotes.map(n => ((n % 12) + 12) % 12);
+        return voiceLeadNatural(newPCs, prevNotes, 0);
     }
 
     // ──────────────────────────────────────────────
@@ -1051,97 +1260,277 @@
     }
 
     /**
+     * Get Neo-Riemannian chord transformations (P, R, L).
+     * These are the 3 "neighbor" chords that share 2 out of 3 notes.
+     *
+     * P (Parallel): same root, flip major↔minor (C→Cm, Am→A)
+     * R (Relative): relative major/minor (C→Am, Am→C, Cm→Eb, Ebm→Gb)
+     * L (Leading tone): move one note by semitone to flip quality
+     *   Major→minor: root stays, 5th moves up → e.g. C(CEG)→Em(EGB) 
+     *   Minor→major: root stays, root moves down → e.g. Am(ACE)→F(FAC)
+     *
+     * @param {number} root - Root pitch class (0-11)
+     * @param {string} quality - Current chord quality
+     * @returns {{ P: {root, quality}, R: {root, quality}, L: {root, quality} }}
+     */
+    function getNeoRiemannian(root, quality) {
+        const isMajor = QUALITY_FAMILY[quality] === 'major' || quality === 'maj7' || quality === 'maj' || quality === 'dom7' || quality === 'dom9' || quality === 'dom13' || quality === 'sus4';
+        const isMinor = !isMajor;
+
+        // P: Parallel — same root, flip quality
+        const P = {
+            root: root,
+            quality: isMajor ? 'min7' : 'maj7',
+            type: 'neo_riemannian',
+            role: 'parallel'
+        };
+
+        // R: Relative — relative major/minor relationship
+        // Major → down minor 3rd (C→Am): root - 3
+        // Minor → up minor 3rd (Am→C): root + 3
+        const R = {
+            root: isMajor ? (root + 9) % 12 : (root + 3) % 12,
+            quality: isMajor ? 'min7' : 'maj7',
+            type: 'neo_riemannian',
+            role: 'relative'
+        };
+
+        // L: Leading tone exchange
+        // Major → down semitone from root (C→Em): root + 4
+        // Minor → up semitone to 5th (Em→C): root + 8
+        const L = {
+            root: isMajor ? (root + 4) % 12 : (root + 8) % 12,
+            quality: isMajor ? 'min7' : 'maj7',
+            type: 'neo_riemannian',
+            role: 'leading_tone'
+        };
+
+        return { P, R, L };
+    }
+
+    /**
      * Compute the 16 context chords for the outer ring.
-     * Organized by harmonic relationship to the current chord.
+     * Organized into 4 QUADRANTS of 4 pads each by musical intent:
+     *
+     *   Resolve (0-3):  ↓ tension — standard landing spots
+     *   Color   (4-7):  = tension — Neo-Riemannian neighbors, same energy different shade
+     *   Tension (8-11): ↑ tension — dominants, approach chords
+     *   Portal  (12-15): ⚡ jump — shortcuts across the circle
      *
      * @param {number} currentRoot - Current chord's root (0-11)
      * @param {string} currentQuality - Current chord quality
      * @param {number} key - Current key (0-11)
      * @param {string} modeName - Current mode name
-     * @returns {Array<{root, quality, type, label}>} 16 context chord objects
+     * @returns {Array<{root, quality, type, quadrant, role, label}>} 16 context chord objects
      */
     function computeContextChords(currentRoot, currentQuality, key, modeName) {
         const scale = MODES[modeName] || MODES.ionian;
         const degree7ths = MODE_DEGREE_7THS[modeName] || MODE_DEGREE_7THS.ionian;
-        const context = [];
-        const usedRoots = new Set();
-        usedRoots.add(currentRoot); // don't include current chord
+        const currentDegree = getDiatonicDegree(currentRoot, key, modeName);
 
-        // Helper: add chord if root not already included
-        function addIfNew(chord) {
-            if (context.length >= 16) return;
-            if (usedRoots.has(chord.root)) return;
-            usedRoots.add(chord.root);
-            // Add display label
-            chord.label = getChordName(chord.root, chord.quality);
-            context.push(chord);
-        }
-
-        // 1. DIATONIC NEIGHBORS (up to 6 chords)
-        for (let deg = 0; deg < 7; deg++) {
-            const root = (key + scale[deg]) % 12;
-            if (root === currentRoot) continue;
-            addIfNew({ root, quality: degree7ths[deg], type: 'diatonic' });
-        }
-
-        // 2. SECONDARY DOMINANTS (V7 of ii, iii, IV, V, vi)
-        const secDomTargets = [1, 2, 3, 4, 5]; // degrees to target
-        for (const targetDeg of secDomTargets) {
-            const targetRoot = (key + scale[targetDeg]) % 12;
-            const sd = getSecondaryDominant(targetRoot);
-            // Only add if it's not already diatonic
-            if (getDiatonicDegree(sd.root, key, modeName) < 0) {
-                addIfNew(sd);
-            }
-        }
-
-        // 3. TRITONE SUBSTITUTIONS of primary dominants
-        const primaryV = (key + scale[4]) % 12;
-        const triSub = getTritoneSubstitution(primaryV);
-        addIfNew(triSub);
-        // Tritone sub of V/ii
-        const secV_ii = getSecondaryDominant((key + scale[1]) % 12);
-        const triSub2 = getTritoneSubstitution(secV_ii.root);
-        addIfNew(triSub2);
-
-        // 4. MODAL INTERCHANGE
-        const miChords = getModalInterchange(key, modeName);
-        for (const mic of miChords) {
-            addIfNew(mic);
-        }
-
-        // 5. EXTENSIONS of current chord (same root, different quality)
-        const extensionQualities = ['maj9', 'min9', 'dom9', 'dom13', 'sus4', 'min11'];
-        for (const eq of extensionQualities) {
-            if (eq === currentQuality || context.length >= 16) continue;
-            // Only add a couple of extensions
-            const extChord = {
-                root: currentRoot, quality: eq, type: 'extension',
-                label: getChordName(currentRoot, eq)
+        // Helper to build a labeled chord object
+        function makeChord(root, quality, quadrant, role) {
+            return {
+                root: root % 12,
+                quality,
+                type: quadrant,       // used for backward compat
+                quadrant,             // new: 'resolve'|'color'|'tension'|'portal'
+                role,                 // new: descriptive role name
+                label: getChordName(root % 12, quality)
             };
-            if (context.length < 16) {
-                context.push(extChord);
-                if (context.filter(c => c.type === 'extension').length >= 2) break;
+        }
+
+        // ═══════════════════════════════════════════════
+        // QUADRANT 1: RESOLVE (pads 0-3) — "where to land"
+        // ═══════════════════════════════════════════════
+        const resolve = [];
+
+        // Pad 0: Strongest functional resolution from current chord
+        if (currentDegree === 4) {
+            // On V → resolve to I
+            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
+        } else if (currentDegree === 1) {
+            // On ii → go to V
+            resolve.push(makeChord((key + scale[4]) % 12, degree7ths[4], 'resolve', 'resolution'));
+        } else if (currentDegree === 0) {
+            // On I → ii (start a ii-V)
+            resolve.push(makeChord((key + scale[1]) % 12, degree7ths[1], 'resolve', 'resolution'));
+        } else if (currentDegree >= 0) {
+            // Other diatonic: resolve down a 5th (circle of 5ths motion)
+            const targetDeg = (currentDegree + 3) % 7;
+            resolve.push(makeChord((key + scale[targetDeg]) % 12, degree7ths[targetDeg], 'resolve', 'resolution'));
+        } else {
+            // Non-diatonic: resolve down semitone to nearest diatonic
+            let resolved = false;
+            for (let offset = 1; offset <= 6; offset++) {
+                const tryRoot = (currentRoot - offset + 12) % 12;
+                const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
+                if (tryDeg >= 0) {
+                    resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
+                    resolved = true;
+                    break;
+                }
+            }
+            if (!resolved) resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
+        }
+
+        // Pad 1: IV chord (plagal / subdominant)
+        const ivRoot = (key + scale[3]) % 12;
+        if (ivRoot !== currentRoot && ivRoot !== resolve[0]?.root) {
+            resolve.push(makeChord(ivRoot, degree7ths[3], 'resolve', 'plagal'));
+        } else {
+            // If IV is current or same as resolution, use V instead
+            const vRoot = (key + scale[4]) % 12;
+            resolve.push(makeChord(vRoot, degree7ths[4], 'resolve', 'dominant'));
+        }
+
+        // Pad 2: vi chord (deceptive resolution)
+        const viRoot = (key + scale[5]) % 12;
+        const viUsed = resolve.some(c => c.root === viRoot) || viRoot === currentRoot;
+        if (!viUsed) {
+            resolve.push(makeChord(viRoot, degree7ths[5], 'resolve', 'deceptive'));
+        } else {
+            // Fallback: iii chord
+            const iiiRoot = (key + scale[2]) % 12;
+            resolve.push(makeChord(iiiRoot, degree7ths[2], 'resolve', 'mediant'));
+        }
+
+        // Pad 3: I chord (home / tonic)
+        if (key !== currentRoot && !resolve.some(c => c.root === key)) {
+            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+        } else {
+            // If tonic already used, use ii chord
+            const iiRoot = (key + scale[1]) % 12;
+            if (!resolve.some(c => c.root === iiRoot) && iiRoot !== currentRoot) {
+                resolve.push(makeChord(iiRoot, degree7ths[1], 'resolve', 'supertonic'));
+            } else {
+                const vRoot = (key + scale[4]) % 12;
+                resolve.push(makeChord(vRoot, degree7ths[4], 'resolve', 'dominant'));
             }
         }
 
-        // 6. Fill remaining slots with chromatic mediants
-        if (context.length < 16) {
-            const mediants = getChromaticMediants(currentRoot, currentQuality);
-            for (const med of mediants) {
-                addIfNew(med);
-            }
+        // ═══════════════════════════════════════════════
+        // QUADRANT 2: COLOR (pads 4-7) — "same energy, different shade"
+        // ═══════════════════════════════════════════════
+        const color = [];
+        const neoR = getNeoRiemannian(currentRoot, currentQuality);
+
+        // Pad 4: Parallel (P) — flip major↔minor
+        color.push(makeChord(neoR.P.root, neoR.P.quality, 'color', 'parallel'));
+
+        // Pad 5: Relative (R) — relative major/minor
+        if (neoR.R.root !== neoR.P.root) {
+            color.push(makeChord(neoR.R.root, neoR.R.quality, 'color', 'relative'));
+        } else {
+            // Fallback: chromatic mediant (M3 up with same quality)
+            color.push(makeChord((currentRoot + 4) % 12, currentQuality, 'color', 'mediant_up'));
         }
 
-        // Pad to exactly 16 if needed (shouldn't happen often)
+        // Pad 6: Leading tone (L) — Neo-Riemannian L transform
+        if (neoR.L.root !== neoR.P.root && neoR.L.root !== neoR.R.root) {
+            color.push(makeChord(neoR.L.root, neoR.L.quality, 'color', 'leading_tone'));
+        } else {
+            // Fallback: chromatic mediant (m3 up)
+            color.push(makeChord((currentRoot + 3) % 12, 'min7', 'color', 'mediant_m3'));
+        }
+
+        // Pad 7: Modal borrow — strongest borrowed chord from parallel key
+        const miChords = getModalInterchange(key, modeName);
+        const unusedMi = miChords.filter(c =>
+            c.root !== currentRoot &&
+            !color.some(cc => cc.root === c.root)
+        );
+        if (unusedMi.length > 0) {
+            // Prefer iv (in major) or IV (in minor) — the most iconic borrow
+            const borrowDeg3 = unusedMi.find(c => c.degree === 3); // iv / IV
+            const chosen = borrowDeg3 || unusedMi[0];
+            color.push(makeChord(chosen.root, chosen.quality, 'color', 'modal_borrow'));
+        } else {
+            // Fallback: chromatic mediant down (M3 down)
+            color.push(makeChord((currentRoot + 8) % 12, 'maj7', 'color', 'mediant_down'));
+        }
+
+        // ═══════════════════════════════════════════════
+        // QUADRANT 3: TENSION (pads 8-11) — "build expectation"
+        // ═══════════════════════════════════════════════
+        const tension = [];
+
+        // Pad 8: Secondary dominant — V7 that resolves TO the current chord
+        const secDomOfCurrent = getSecondaryDominant(currentRoot);
+        tension.push(makeChord(secDomOfCurrent.root, secDomOfCurrent.quality, 'tension', 'secondary_dominant'));
+
+        // Pad 9: Tritone sub of V — chromatic approach to current key's tonic
+        const primaryV = (key + scale[4]) % 12;
+        const triSubV = getTritoneSubstitution(primaryV);
+        if (triSubV.root !== secDomOfCurrent.root && triSubV.root !== currentRoot) {
+            tension.push(makeChord(triSubV.root, triSubV.quality, 'tension', 'tritone_sub'));
+        } else {
+            // Tritone sub of the current chord's dominant
+            const triSubCurrent = getTritoneSubstitution(secDomOfCurrent.root);
+            tension.push(makeChord(triSubCurrent.root, triSubCurrent.quality, 'tension', 'tritone_sub'));
+        }
+
+        // Pad 10: V7/ii — secondary dominant of ii (sets up the classic ii-V)
+        const iiRoot = (key + scale[1]) % 12;
+        const secDomOfII = getSecondaryDominant(iiRoot);
+        if (secDomOfII.root !== currentRoot && !tension.some(c => c.root === secDomOfII.root)) {
+            tension.push(makeChord(secDomOfII.root, secDomOfII.quality, 'tension', 'secondary_dom_ii'));
+        } else {
+            // V7/vi — secondary dominant of vi
+            const viRoot2 = (key + scale[5]) % 12;
+            const secDomOfVI = getSecondaryDominant(viRoot2);
+            tension.push(makeChord(secDomOfVI.root, secDomOfVI.quality, 'tension', 'secondary_dom_vi'));
+        }
+
+        // Pad 11: Dominant chain next — next dom7 in circle of 5ths from current position
+        const domChainRoot = (currentRoot + 5) % 12; // down a 5th = up a 4th
+        if (domChainRoot !== currentRoot && !tension.some(c => c.root === domChainRoot)) {
+            tension.push(makeChord(domChainRoot, 'dom7', 'tension', 'dominant_chain'));
+        } else {
+            // Chain the other direction (up a 5th)
+            const domChainUp = (currentRoot + 7) % 12;
+            tension.push(makeChord(domChainUp, 'dom7', 'tension', 'dominant_chain'));
+        }
+
+        // ═══════════════════════════════════════════════
+        // QUADRANT 4: PORTAL (pads 12-15) — "jump across the circle"
+        // ═══════════════════════════════════════════════
+        const portal = [];
+
+        // Pad 12: Coltrane jump — M3 up (Giant Steps direction)
+        const coltraneUp = (currentRoot + 4) % 12;
+        const coltraneUpQ = getDefaultQuality(coltraneUp, key, modeName);
+        // Use maj7 for the Coltrane sound if not diatonic
+        portal.push(makeChord(coltraneUp,
+            getDiatonicDegree(coltraneUp, key, modeName) >= 0 ? coltraneUpQ : 'maj7',
+            'portal', 'coltrane_up'));
+
+        // Pad 13: Coltrane jump — M3 down (other Giant Steps direction)
+        const coltraneDown = (currentRoot + 8) % 12;
+        const coltraneDownQ = getDefaultQuality(coltraneDown, key, modeName);
+        portal.push(makeChord(coltraneDown,
+            getDiatonicDegree(coltraneDown, key, modeName) >= 0 ? coltraneDownQ : 'maj7',
+            'portal', 'coltrane_down'));
+
+        // Pad 14: Chromatic slide — semitone up, same quality family
+        const slideRoot = (currentRoot + 1) % 12;
+        const slideQ = getDefaultQuality(slideRoot, key, modeName);
+        portal.push(makeChord(slideRoot,
+            getDiatonicDegree(slideRoot, key, modeName) >= 0 ? slideQ : currentQuality,
+            'portal', 'chromatic_slide'));
+
+        // Pad 15: Diminished bridge — dim7 chord that connects to 4 keys
+        const dimRoot = (currentRoot + 11) % 12; // vii°7 of current chord (leading tone)
+        portal.push(makeChord(dimRoot, 'dim7', 'portal', 'diminished_bridge'));
+
+        // ═══════════════════════════════════════════════
+        // Combine all 4 quadrants into the 16-pad array
+        // ═══════════════════════════════════════════════
+        const context = [...resolve, ...color, ...tension, ...portal];
+
+        // Safety: ensure exactly 16
         while (context.length < 16) {
-            const fillRoot = (currentRoot + context.length) % 12;
-            context.push({
-                root: fillRoot,
-                quality: 'dom7',
-                type: 'fill',
-                label: getChordName(fillRoot, 'dom7')
-            });
+            context.push(makeChord((currentRoot + context.length) % 12, 'dom7', 'fill', 'fill'));
         }
 
         return context.slice(0, 16);
@@ -1245,6 +1634,7 @@
         CIRCLE_INDEX,
         getDiatonicDegree,
         getDefaultQuality,
+        getNeoRiemannian,
         getSecondaryDominant,
         getTritoneSubstitution,
         getModalInterchange,
@@ -1252,6 +1642,10 @@
         computeSuggestions,
         computeContextChords,
         getRingChordInfo,
+
+        // Quality modifiers (small ring)
+        RING_QUALITY_MODIFIERS,
+        applyQualityModifier,
     };
 
     console.log('[ChordFieldEngine] Loaded — jazz/gospel/blues harmony engine');

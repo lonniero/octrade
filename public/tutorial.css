@@ -1,0 +1,440 @@
+/* ============================================
+   OCTADRE — Tutorial / Onboarding Overlay
+   ============================================ */
+
+/* Google Fonts — pixel-art vibe */
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+/* ── Contextual Hints (inline "try it" toasts) ── */
+.ctx-hint {
+    position: fixed;
+    max-width: 300px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 14px 16px;
+    background: linear-gradient(160deg, rgba(142, 130, 176, 0.92) 0%, rgba(100, 90, 140, 0.95) 100%);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+    transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.ctx-hint.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+.ctx-hint.dismissing {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+}
+
+.ctx-hint-icon {
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.ctx-hint-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.ctx-hint-title {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px;
+    color: #ffffff;
+    margin-bottom: 5px;
+    letter-spacing: 0.5px;
+}
+
+.ctx-hint-body {
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    line-height: 1.55;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.ctx-hint-body strong {
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.ctx-hint-close {
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.ctx-hint-close:hover {
+    background: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+}
+
+/* ── Help Button (always visible in header) ── */
+.tutorial-help-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 1px solid rgba(142, 130, 176, 0.4);
+    background: rgba(142, 130, 176, 0.12);
+    color: #8E82B0;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    margin-left: 6px;
+}
+
+.tutorial-help-btn:hover {
+    background: rgba(142, 130, 176, 0.3);
+    border-color: #8E82B0;
+    color: #ffffff;
+    box-shadow: 0 0 12px rgba(142, 130, 176, 0.3);
+    transform: scale(1.1);
+}
+
+/* ── Overlay ── */
+.tutorial-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    transition: opacity 0.4s ease;
+}
+
+.tutorial-overlay.splash-mode {
+    background: linear-gradient(160deg,
+            #8E82B0 0%,
+            #9B8FBF 30%,
+            #7B70A0 100%);
+}
+
+.tutorial-overlay.highlight-mode {
+    background: transparent;
+    pointer-events: none;
+}
+
+.tutorial-overlay.highlight-mode>* {
+    pointer-events: auto;
+}
+
+.tutorial-overlay.dismissing {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* ── Interactive Mode (click-through to grid) ── */
+.tutorial-overlay.interactive-mode {
+    pointer-events: none;
+}
+
+.tutorial-overlay.interactive-mode .tutorial-card {
+    pointer-events: auto;
+}
+
+.tutorial-overlay.interactive-mode .tutorial-spotlight {
+    pointer-events: none;
+}
+
+.tutorial-overlay.interactive-mode .tutorial-progress {
+    pointer-events: auto;
+}
+
+/* ── Spotlight Cutout ── */
+.tutorial-spotlight {
+    position: fixed;
+    z-index: 10001;
+    transition: all 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+}
+
+/* Pulsing border during interactive mode */
+.interactive-mode .tutorial-spotlight {
+    animation: spotlight-pulse 2s ease-in-out infinite;
+}
+
+@keyframes spotlight-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 9999px rgba(6, 6, 12, 0.82), 0 0 30px 5px rgba(142, 130, 176, 0.25) inset, 0 0 0 2px rgba(142, 130, 176, 0.3);
+    }
+
+    50% {
+        box-shadow: 0 0 0 9999px rgba(6, 6, 12, 0.82), 0 0 30px 5px rgba(142, 130, 176, 0.4) inset, 0 0 0 3px rgba(142, 130, 176, 0.5);
+    }
+}
+
+/* ── Card (shared) ── */
+.tutorial-card {
+    z-index: 10002;
+    opacity: 0;
+    transform: translateY(16px);
+    transition: opacity 0.35s ease, transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tutorial-card.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* ── Splash Card ── */
+.splash-card {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 24px;
+}
+
+.splash-logo {
+    font-family: 'Press Start 2P', monospace;
+    font-size: clamp(28px, 5vw, 48px);
+    color: #ffffff;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    text-shadow: 0 2px 20px rgba(0, 0, 0, 0.15);
+    animation: logo-float 3s ease-in-out infinite;
+}
+
+@keyframes logo-float {
+
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-6px);
+    }
+}
+
+.splash-subtitle {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: clamp(8px, 1.2vw, 11px);
+    color: rgba(255, 255, 255, 0.85);
+    line-height: 2;
+    max-width: 520px;
+    letter-spacing: 0.5px;
+}
+
+/* ── Highlight Card ── */
+.highlight-card {
+    position: fixed;
+    width: 320px;
+    background: linear-gradient(165deg,
+            rgba(142, 130, 176, 0.95) 0%,
+            rgba(110, 100, 150, 0.97) 100%);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow:
+        0 16px 48px rgba(0, 0, 0, 0.35),
+        0 4px 12px rgba(0, 0, 0, 0.2),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.card-header {
+    margin-bottom: 12px;
+}
+
+.card-step-label {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8px;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.card-title {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 16px;
+    color: #ffffff;
+    margin-top: 6px;
+    letter-spacing: 1px;
+}
+
+.card-body {
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    line-height: 1.65;
+    color: rgba(255, 255, 255, 0.88);
+    margin-bottom: 20px;
+}
+
+/* ── Try It Badge & Counter ── */
+.try-badge {
+    display: inline-block;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8px;
+    color: #ffffff;
+    background: rgba(0, 232, 160, 0.2);
+    border: 1px solid rgba(0, 232, 160, 0.4);
+    border-radius: 20px;
+    padding: 4px 10px;
+    margin-left: 8px;
+    animation: badge-glow 1.5s ease-in-out infinite;
+    vertical-align: middle;
+}
+
+@keyframes badge-glow {
+
+    0%,
+    100% {
+        box-shadow: 0 0 6px rgba(0, 232, 160, 0.2);
+    }
+
+    50% {
+        box-shadow: 0 0 14px rgba(0, 232, 160, 0.4);
+    }
+}
+
+.try-counter {
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.7);
+    min-height: 20px;
+    margin-bottom: 12px;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.try-counter.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.card-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+/* ── Buttons ── */
+.tutorial-btn {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    padding: 12px 24px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.5px;
+}
+
+.tutorial-btn.primary {
+    background: #ffffff;
+    color: #6B5F8D;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+}
+
+.tutorial-btn.primary:hover {
+    background: #f0eef5;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+}
+
+.tutorial-btn.secondary {
+    background: rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.tutorial-btn.secondary:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.tutorial-btn.skip {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 8px;
+    padding: 8px 16px;
+}
+
+.tutorial-btn.skip:hover {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+/* ── Progress ── */
+.tutorial-progress {
+    position: fixed;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10003;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.tutorial-dots {
+    display: flex;
+    gap: 6px;
+}
+
+.tutorial-dots .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.25);
+    transition: all 0.3s ease;
+}
+
+.tutorial-dots .dot.active {
+    background: #ffffff;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+    transform: scale(1.25);
+}
+
+.tutorial-dots .dot.done {
+    background: rgba(255, 255, 255, 0.6);
+}
+
+.tutorial-step-count {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8px;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 1px;
+}
+
+/* Keyboard hint */
+.tutorial-overlay::after {
+    content: 'Press ESC to skip';
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px;
+    color: rgba(255, 255, 255, 0.3);
+    letter-spacing: 1px;
+    z-index: 10003;
+}
