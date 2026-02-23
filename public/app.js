@@ -118,7 +118,7 @@ const state = {
     lastPressedStep: 0,
     mode: 'seq', // 'seq', 'chords', or 'harmony'
     smallGridMode: 'length', // 'length', 'velocity', 'octave'
-    workspace: 2, // 0: big_grid only, 1: + notes, 2: + small grid
+    workspace: 0, // 0: big_grid only, 1: + notes, 2: + small grid
     page: 0, // 0 = tracks 1-8, 1 = tracks 9-16
     playing: false,
     bpm: 120,
