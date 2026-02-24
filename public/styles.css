@@ -2184,3 +2184,507 @@ button:focus:not(:focus-visible) {
     color: #00e8a0;
     box-shadow: 0 0 8px rgba(0, 232, 160, 0.15);
 }
+
+/* ============================================
+   MOBILE & TABLET RESPONSIVE SYSTEM
+   All styles below are in @media queries —
+   desktop layout is completely unaffected.
+   ============================================ */
+
+/* Touch optimizations — harmless on desktop */
+.pad,
+.ctrl-btn,
+.mode-btn,
+.scene-btn,
+.side-btn,
+.transport-btn,
+.action-btn,
+.tempo-mod-btn {
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Mobile-only elements — hidden on desktop */
+.mobile-panel-toggle,
+.mobile-overlay {
+    display: none;
+}
+
+/* ---- Tablet & iPad (≤960px): Drawer panels ---- */
+@media (max-width: 960px) {
+
+    /* Show floating toggle buttons */
+    .mobile-panel-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: fixed;
+        z-index: 100;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        border: 1px solid var(--border-medium);
+        background: rgba(37, 37, 56, 0.92);
+        color: var(--text-secondary);
+        cursor: pointer;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        transition: all 0.2s ease;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+    }
+
+    .mobile-toggle-left {
+        left: 12px;
+        bottom: 24px;
+    }
+
+    .mobile-toggle-right {
+        right: 12px;
+        bottom: 24px;
+    }
+
+    .mobile-panel-toggle:active {
+        background: var(--accent);
+        color: var(--bg-primary);
+        border-color: var(--accent);
+        transform: scale(0.92);
+    }
+
+    /* Convert side panels to slide-out drawers */
+    #track-panel {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        z-index: 200;
+        width: 280px;
+        min-width: 280px;
+        display: flex !important;
+        transform: translateX(-100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 4px 0 30px rgba(0, 0, 0, 0.6);
+        overflow-y: auto;
+    }
+
+    #control-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 200;
+        width: 260px;
+        min-width: 260px;
+        display: flex !important;
+        transform: translateX(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: -4px 0 30px rgba(0, 0, 0, 0.6);
+        overflow-y: auto;
+    }
+
+    #track-panel.mobile-open {
+        transform: translateX(0);
+    }
+
+    #control-panel.mobile-open {
+        transform: translateX(0);
+    }
+
+    /* Overlay backdrop */
+    .mobile-overlay {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 150;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
+    }
+
+    .mobile-overlay.active {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    /* Grid section takes full width */
+    #grid-section {
+        padding: 10px;
+    }
+
+    /* Responsive grid */
+    #pad-grid {
+        width: min(500px, calc(100vw - 80px));
+        height: min(500px, calc(100vw - 80px));
+    }
+
+    /* MIDI labels compact */
+    .midi-select-group label {
+        display: none;
+    }
+}
+
+/* ---- Small tablet / large phone (≤768px) ---- */
+@media (max-width: 768px) {
+
+    /* Header wraps into 2 rows */
+    #header {
+        flex-wrap: wrap;
+        height: auto;
+        min-height: auto;
+        padding: 8px 12px;
+        gap: 6px;
+    }
+
+    .header-left {
+        order: 1;
+    }
+
+    .header-center {
+        order: 3;
+        width: 100%;
+        display: flex;
+        justify-content: center;
+    }
+
+    .header-right {
+        order: 2;
+        margin-left: auto;
+    }
+
+    /* Hide MIDI selects — accessible via panel */
+    .midi-config .midi-select-group {
+        display: none;
+    }
+
+    .clock-source-toggle {
+        display: none;
+    }
+
+    .transport-controls {
+        gap: 8px;
+    }
+
+    /* Grid responsive */
+    #pad-grid {
+        width: min(440px, calc(100vw - 76px));
+        height: min(440px, calc(100vw - 76px));
+        gap: 3px;
+    }
+
+    /* Mode bar horizontal scroll */
+    #mode-bar {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+
+    #mode-bar::-webkit-scrollbar {
+        display: none;
+    }
+
+    .mode-btn {
+        padding: 5px 14px;
+        font-size: 11px;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    /* Top controls scroll */
+    #top-controls {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        justify-content: flex-start;
+        scrollbar-width: none;
+    }
+
+    #top-controls::-webkit-scrollbar {
+        display: none;
+    }
+
+    .ctrl-btn {
+        height: 28px;
+        padding: 0 8px;
+        font-size: 10px;
+        flex-shrink: 0;
+    }
+
+    /* Side buttons narrower */
+    #side-buttons {
+        width: 36px;
+    }
+
+    .side-btn {
+        font-size: 9px;
+    }
+
+    /* Step info: horizontal scroll */
+    #step-info {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        gap: 10px;
+        padding: 8px 12px;
+        scrollbar-width: none;
+    }
+
+    #step-info::-webkit-scrollbar {
+        display: none;
+    }
+
+    .info-group {
+        flex-shrink: 0;
+    }
+
+    /* Scene buttons compact */
+    .scene-btn {
+        width: 40px;
+        height: 28px;
+        font-size: 11px;
+    }
+
+    /* Harmony controls */
+    .harmony-controls {
+        gap: 8px;
+        padding: 6px 10px;
+    }
+
+    .harmony-key-label {
+        min-width: 64px;
+        font-size: 0.75rem;
+    }
+
+    .cf-humanize-row {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .cf-toggle {
+        font-size: 0.65rem;
+        height: 22px;
+        padding: 0 8px;
+    }
+
+    /* Floating buttons reposition */
+    .mobile-toggle-left {
+        left: 8px;
+        bottom: 20px;
+    }
+
+    .mobile-toggle-right {
+        right: 8px;
+        bottom: 20px;
+    }
+}
+
+/* ---- Phone portrait (≤480px) ---- */
+@media (max-width: 480px) {
+    #header {
+        padding: 6px 10px;
+        gap: 4px;
+    }
+
+    .logo {
+        font-size: 14px;
+        letter-spacing: 2px;
+    }
+
+    .logo-sub {
+        display: none;
+    }
+
+    .header-right {
+        display: none;
+    }
+
+    .transport-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    #bpm-input {
+        width: 48px;
+        height: 28px;
+        font-size: 12px;
+    }
+
+    .metronome-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    /* Grid fills screen */
+    #pad-grid {
+        width: calc(100vw - 56px);
+        height: calc(100vw - 56px);
+        gap: 2px;
+        padding: 2px;
+    }
+
+    #side-buttons {
+        width: 28px;
+    }
+
+    .side-btn {
+        font-size: 7px;
+    }
+
+    #step-info {
+        gap: 6px;
+        padding: 6px 8px;
+    }
+
+    .info-label {
+        font-size: 8px;
+    }
+
+    .info-value {
+        font-size: 11px;
+    }
+
+    #scene-bar {
+        gap: 4px;
+    }
+
+    .scene-label {
+        font-size: 8px;
+        letter-spacing: 1px;
+        margin-right: 4px;
+    }
+
+    .scene-btn {
+        width: 32px;
+        height: 24px;
+        font-size: 10px;
+    }
+
+    /* Panels take more width on phone */
+    #track-panel {
+        width: 85vw;
+        min-width: unset;
+        max-width: 320px;
+    }
+
+    #control-panel {
+        width: 80vw;
+        min-width: unset;
+        max-width: 300px;
+    }
+
+    .mobile-toggle-left {
+        left: 8px;
+        bottom: 16px;
+        width: 40px;
+        height: 40px;
+    }
+
+    .mobile-toggle-right {
+        right: 8px;
+        bottom: 16px;
+        width: 40px;
+        height: 40px;
+    }
+
+    .sample-browser-header {
+        padding: 8px 10px;
+    }
+
+    .sb-action-btn {
+        padding: 3px 6px;
+        font-size: 9px;
+    }
+
+    .sample-browser-body {
+        max-height: 200px;
+    }
+}
+
+/* ---- Landscape phone ---- */
+@media (max-height: 500px) and (orientation: landscape) {
+    #header {
+        height: 38px;
+        min-height: 38px;
+        padding: 4px 12px;
+    }
+
+    .logo {
+        font-size: 13px;
+    }
+
+    .logo-sub {
+        display: none;
+    }
+
+    #grid-section {
+        padding: 4px 8px;
+        gap: 4px;
+    }
+
+    #pad-grid {
+        width: min(340px, calc(100vh - 100px));
+        height: min(340px, calc(100vh - 100px));
+        gap: 2px;
+    }
+
+    #mode-bar {
+        padding: 2px;
+    }
+
+    .mode-btn {
+        padding: 3px 10px;
+        font-size: 10px;
+    }
+
+    #step-info {
+        padding: 4px 10px;
+        gap: 6px;
+    }
+
+    #top-controls {
+        margin-bottom: 4px;
+    }
+
+    .ctrl-btn {
+        height: 24px;
+        font-size: 9px;
+        padding: 0 6px;
+    }
+
+    .sample-browser {
+        display: none;
+    }
+
+    #scene-bar {
+        margin-top: 4px;
+    }
+}
+
+/* iPad portrait specific */
+@media (min-width: 768px) and (max-width: 1024px) and (orientation: portrait) {
+    #pad-grid {
+        width: min(500px, calc(100vw - 100px));
+        height: min(500px, calc(100vw - 100px));
+    }
+
+    .mobile-panel-toggle {
+        width: 48px;
+        height: 48px;
+    }
+}
+
+/* Safe area insets for notched phones */
+@supports (padding: env(safe-area-inset-bottom)) {
+    @media (max-width: 960px) {
+
+        .mobile-toggle-left,
+        .mobile-toggle-right {
+            bottom: calc(16px + env(safe-area-inset-bottom));
+        }
+
+        #app {
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+    }
+}
