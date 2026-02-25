@@ -3752,8 +3752,12 @@ function handleChordFieldPadPress(row, col) {
         return;
     }
 
-    // ── Classic grid mode (unchanged) ──
-    const { root, quality } = cfGetPadInfo(row, col);
+    // ── Classic grid mode ──
+    const { root, quality: baseQuality } = cfGetPadInfo(row, col);
+
+    // Apply quality modifier (triad, 9th, 11th, etc.)
+    const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+    const quality = ChordFieldEngine.applyQualityModifier(baseQuality, modKey);
 
     // Voice the chord
     const voicingType = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex];
@@ -4190,9 +4194,11 @@ function renderChordFieldPad(pad, row, col) {
     pad.style.opacity = isActive ? 1.0 : (hasGlow ? CF_GLOW_OPACITY[glowLevel] : 0.7);
     pad.style.transition = 'all 0.15s ease';
 
-    // Show chord label
+    // Show chord label (apply active quality modifier)
+    const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+    const displayQuality = ChordFieldEngine.applyQualityModifier(quality, modKey);
     const rootName = CF_NOTE_NAMES[root];
-    const suffix = ChordFieldEngine.getQualitySuffix(quality);
+    const suffix = ChordFieldEngine.getQualitySuffix(displayQuality);
     pad.textContent = rootName + suffix;
     pad.style.fontSize = '9px';
     pad.style.color = glowLevel >= 2 ? '#1a1a2e' : '#fff';
@@ -4236,7 +4242,9 @@ function renderRingPad(pad, row, col) {
         const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
         const isDiatonic = ChordFieldEngine.getDiatonicDegree(root, cf.key, modeName) >= 0;
         const isActiveRoot = root === cf.ringActiveRoot;
-        const quality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
+        const baseQuality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
+        const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+        const quality = ChordFieldEngine.applyQualityModifier(baseQuality, modKey);
 
         pad.textContent = ChordFieldEngine.getChordName(root, quality);
 
@@ -4271,7 +4279,9 @@ function renderRingPad(pad, row, col) {
         // Context chords — colored by QUADRANT (resolve/color/tension/portal)
         const ctx = cf.ringContextChords?.[index];
         if (ctx) {
-            pad.textContent = ctx.label || ChordFieldEngine.getChordName(ctx.root, ctx.quality);
+            const ctxModKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+            const ctxDisplayQ = ChordFieldEngine.applyQualityModifier(ctx.quality, ctxModKey);
+            pad.textContent = ChordFieldEngine.getChordName(ctx.root, ctxDisplayQ);
 
             // Color by quadrant (new 4-quadrant system)
             const quadrantColorMap = {

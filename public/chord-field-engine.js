@@ -600,9 +600,11 @@
 
         // Build quartal stack for upper voices
         // Stack chord tones in 4ths above bass
+        // Limit upper voice count to match chord size (triads = 2 upper voices)
+        const maxUpperVoices = Math.min(3, pcs.length - 1);
         const upperPCs = [];
         let quartalMidi = bass + 5; // start a 4th above bass
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < maxUpperVoices; i++) {
             const targetPC = quartalMidi % 12;
             // Snap to nearest chord tone
             let bestPC = targetPC;
