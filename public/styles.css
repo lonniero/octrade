@@ -2167,6 +2167,28 @@ button:focus:not(:focus-visible) {
 }
 
 /* ============================================
+   CHORD FIELD MODULATION TARGET INDICATOR
+   ============================================ */
+
+@keyframes modTargetPulse {
+
+    0%,
+    100% {
+        opacity: 0.85;
+        filter: brightness(1);
+    }
+
+    50% {
+        opacity: 1;
+        filter: brightness(1.2);
+    }
+}
+
+.cf-mod-target {
+    animation: modTargetPulse 1.8s ease-in-out infinite;
+}
+
+/* ============================================
    CHORD FIELD HUMANIZATION CONTROLS
    ============================================ */
 

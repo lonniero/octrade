@@ -205,7 +205,7 @@ const chordFieldState = {
     arpLastNote: null,        // last arp note played (for cleanup)
     arpNotes: [],             // computed arp note pool
     // Ring Chord Field
-    ringMode: false,          // true = ring layout, false = classic grid
+    ringMode: true,           // true = ring layout, false = classic grid
     ringActiveRoot: 0,        // currently active root pitch class (0-11)
     ringActiveQuality: 'maj7',// currently active chord quality
     ringContextChords: [],    // 16 context chord objects for outer ring
@@ -1605,6 +1605,10 @@ function setMode(mode) {
     }
     if (mode === 'chordfield') {
         initChordFieldRhodes();
+        // Initialize ring mode on first entry (ring is the default layout)
+        if (chordFieldState.ringMode && chordFieldState.ringContextChords.length === 0) {
+            cfInitRingMode(chordFieldState);
+        }
     }
 
     renderGrid();
@@ -3267,9 +3271,31 @@ const CF_LP_GLOW_COLORS = [43, 45, 9, 3]; // dark teal, mid teal, amber, white
 const CF_LP_BASE_COLOR = 45;  // neutral teal for pre-glow state
 
 // ── Ring Chord Field Colors ──
-// CSS colors per zone
+
+// Key-color system: each key gets a unique hue on the inner ring.
+// Hue rotates 30° per semitone from 180° (teal) at C.
+// Moving around the circle of fifths gives smooth visual transitions.
+function getKeyHue(key) {
+    return (180 + key * 30) % 360;
+}
+
+// Generate inner ring colors from the current key's hue
+function getKeyColors(key) {
+    const h = getKeyHue(key);
+    return {
+        diatonic: `hsla(${h}, 65%, 45%, 0.8)`,
+        active: `hsla(${h}, 80%, 85%, 0.95)`,
+        border: `hsla(${h}, 60%, 55%, 0.4)`,
+        borderActive: `hsla(${h}, 90%, 90%, 0.9)`,
+        glow: `hsla(${h}, 50%, 45%, 0.2)`,
+        glowActive: `hsla(${h}, 70%, 60%, 0.6)`,
+    };
+}
+
+// CSS colors per zone (outer ring + center are static, inner is dynamic via getKeyColors)
 const CF_RING_COLORS = {
-    inner_diatonic: 'rgba(50, 180, 180, 0.8)',     // bright teal
+    // Inner ring: these are only used as fallbacks now — getKeyColors() overrides them
+    inner_diatonic: 'rgba(50, 180, 180, 0.8)',     // bright teal (C default)
     inner_chromatic: 'rgba(40, 80, 90, 0.5)',        // dim teal
     inner_active: 'rgba(200, 255, 255, 0.95)',    // bright white-teal
     // Outer ring: 4 quadrant colors
@@ -3614,6 +3640,7 @@ function cfUndoPop(cf) {
     // Reset outer ring lock
     cf.lastOuterPadKey = null;
     cf.lastOuterVoiced = null;
+    cf.lastOuterChordInfo = null;
 
     const label = ChordFieldEngine.getChordName(prev.root, prev.quality);
     cf.lastChordLabel = `↩ ${label}`;
@@ -3959,6 +3986,13 @@ function cfHandleRingPadPress(row, col) {
         cf.activeNotes = cf.lastOuterVoiced.slice();
         cfPlayChordHumanized(cf, cf.activeNotes);
         if (cf.rhythmPattern > 0) cfStartRhythm(cf);
+
+        // Restore the original chord's display info so label matches the sound
+        if (cf.lastOuterChordInfo) {
+            cf.ringActiveRoot = cf.lastOuterChordInfo.root;
+            cf.ringActiveQuality = cf.lastOuterChordInfo.quality;
+            cf.lastChordLabel = cf.lastOuterChordInfo.label;
+        }
     } else {
         cfPlayRingChord(cf, chordInfo.root, chordInfo.quality);
     }
@@ -3967,6 +4001,12 @@ function cfHandleRingPadPress(row, col) {
     if (!isRepeat) {
         cfCascadeRingUpdate(cf, chordInfo.root, chordInfo.quality);
         cf.lastOuterVoiced = cf.activeNotes.slice();
+        // Save the chord info so repeat presses can restore the correct label
+        cf.lastOuterChordInfo = {
+            root: chordInfo.root,
+            quality: chordInfo.quality,
+            label: cf.lastChordLabel
+        };
     }
 
     // Track last outer pad for repeat detection
@@ -3975,6 +4015,7 @@ function cfHandleRingPadPress(row, col) {
     } else {
         cf.lastOuterPadKey = null;
         cf.lastOuterVoiced = null;
+        cf.lastOuterChordInfo = null;
     }
 
     // ── Update active pad tracking ──
@@ -4248,17 +4289,20 @@ function renderRingPad(pad, row, col) {
 
         pad.textContent = ChordFieldEngine.getChordName(root, quality);
 
+        // Key-colored inner ring — hue shifts with modulation
+        const kc = getKeyColors(cf.key);
+
         if (isActiveRoot || isActive) {
-            pad.style.background = CF_RING_COLORS.inner_active;
+            pad.style.background = kc.active;
             pad.style.color = '#1a1a2e';
-            pad.style.borderColor = 'rgba(200, 255, 255, 0.9)';
-            pad.style.boxShadow = '0 0 16px rgba(100, 220, 220, 0.6)';
+            pad.style.borderColor = kc.borderActive;
+            pad.style.boxShadow = `0 0 16px ${kc.glowActive}`;
             pad.style.opacity = '1';
         } else if (isDiatonic) {
-            pad.style.background = CF_RING_COLORS.inner_diatonic;
+            pad.style.background = kc.diatonic;
             pad.style.color = '#fff';
-            pad.style.borderColor = 'rgba(80, 200, 200, 0.4)';
-            pad.style.boxShadow = '0 0 6px rgba(50, 180, 180, 0.2)';
+            pad.style.borderColor = kc.border;
+            pad.style.boxShadow = `0 0 6px ${kc.glow}`;
             pad.style.opacity = '0.9';
         } else {
             pad.style.background = CF_RING_COLORS.inner_chromatic;
@@ -4279,6 +4323,7 @@ function renderRingPad(pad, row, col) {
         // Context chords — colored by QUADRANT (resolve/color/tension/portal)
         const ctx = cf.ringContextChords?.[index];
         if (ctx) {
+            const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
             const ctxModKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
             const ctxDisplayQ = ChordFieldEngine.applyQualityModifier(ctx.quality, ctxModKey);
             pad.textContent = ChordFieldEngine.getChordName(ctx.root, ctxDisplayQ);
@@ -4305,6 +4350,25 @@ function renderRingPad(pad, row, col) {
             pad.style.borderColor = 'rgba(255, 255, 255, 0.15)';
             pad.style.boxShadow = '0 0 6px rgba(100, 140, 180, 0.15)';
             pad.style.opacity = isActive ? '1' : '0.85';
+
+            // ── Modulation target glow ──
+            // If auto-mod is enabled and this outer chord is a dominant that would
+            // complete a ii→V or IV→V modulation, highlight it with the target key's color
+            pad.classList.remove('cf-mod-target');
+            if (cf.modulationEnabled && !isActive &&
+                ChordFieldEngine.isDominantQuality(ctx.quality)) {
+                const modResult = ChordFieldEngine.detectModulation(
+                    cf.ringActiveRoot, cf.ringActiveQuality,
+                    ctx.root, ctx.quality,
+                    cf.key, modeName
+                );
+                if (modResult) {
+                    const targetH = getKeyHue(modResult.newKey);
+                    pad.style.borderColor = `hsla(${targetH}, 85%, 65%, 0.9)`;
+                    pad.style.boxShadow = `0 0 10px hsla(${targetH}, 75%, 55%, 0.5), 0 0 22px hsla(${targetH}, 75%, 55%, 0.15)`;
+                    pad.classList.add('cf-mod-target');
+                }
+            }
 
             if (isActive) {
                 pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
