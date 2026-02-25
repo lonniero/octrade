@@ -1939,6 +1939,17 @@ button:focus:not(:focus-visible) {
     border-left: 1px solid var(--border-subtle);
 }
 
+.harmony-degree-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: #60d0d0;
+    letter-spacing: 0.3px;
+    min-height: 14px;
+    line-height: 14px;
+    opacity: 0.85;
+}
+
 .harmony-step-roman {
     font-family: 'JetBrains Mono', monospace;
     font-size: 1rem;

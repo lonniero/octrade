@@ -1021,6 +1021,40 @@
         return roman + (suffixes[quality] || '');
     }
 
+    /**
+     * Get scale degree Roman numeral for any chord root in any key/mode.
+     * Works for all contexts (inner ring, outer ring, classic grid).
+     * Returns '' for non-diatonic roots.
+     *
+     * @param {number} root - Root pitch class (0-11)
+     * @param {string} quality - Chord quality string
+     * @param {number} key - Current key (0-11)
+     * @param {string} modeName - Current mode
+     * @returns {string} e.g. 'IΔ7', 'ii7', 'V7', 'vii°7', '' for chromatic
+     */
+    function getScaleDegreeLabel(root, quality, key, modeName) {
+        const degree = getDiatonicDegree(root, key, modeName);
+        if (degree < 0) return '';  // non-diatonic — no Roman numeral
+
+        const ROMAN_UPPER = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'];
+        const ROMAN_LOWER = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii'];
+
+        const family = QUALITY_FAMILY[quality] || 'major';
+        const isLower = (family === 'minor' || family === 'diminished');
+        const roman = isLower ? ROMAN_LOWER[degree] : ROMAN_UPPER[degree];
+
+        // Compact suffix for the Roman numeral display
+        const suffixes = {
+            maj7: 'Δ7', min7: '⁷', dom7: '⁷', halfdim7: 'ø7', dim7: '°7',
+            maj9: 'Δ9', min9: '⁹', dom9: '⁹', dom11: '¹¹', dom13: '¹³',
+            min11: '¹¹', min13: '¹³', maj11: 'Δ11', maj13: 'Δ13',
+            dom7alt: '⁷alt', dim: '°', aug: '+',
+            sus2: 'sus2', sus4: 'sus4',
+            maj: '', min: '',
+        };
+        return roman + (suffixes[quality] ?? '');
+    }
+
     function getModeName(modeName) {
         return MODE_LABELS[modeName] || modeName;
     }
@@ -1769,6 +1803,7 @@
         // Display
         getChordName,
         getRomanLabel,
+        getScaleDegreeLabel,
         getModeName,
         getKeyName,
         midiToName,

@@ -4442,6 +4442,7 @@ function updateChordFieldUI() {
     const voicingLabel = document.getElementById('cf-voicing-label');
     const chordLabel = document.getElementById('cf-chord-label');
     const notesLabel = document.getElementById('cf-notes-label');
+    const degreeLabel = document.getElementById('cf-degree-label');
 
     // Show key with modulation indicator if key has shifted from original
     let keyDisplay = `${keyName} ${modeName.charAt(0).toUpperCase() + modeName.slice(1)}`;
@@ -4457,6 +4458,27 @@ function updateChordFieldUI() {
         notesLabel.textContent = cf.activeNotes.length > 0
             ? cf.activeNotes.map(n => ChordFieldEngine.midiToNoteName(n)).join(' ')
             : '';
+    }
+
+    // Show scale degree Roman numeral for active chord
+    if (degreeLabel) {
+        let activeRoot, activeQuality;
+        if (cf.ringMode) {
+            activeRoot = cf.ringActiveRoot;
+            activeQuality = cf.ringActiveQuality;
+        } else if (cf.activePadRow !== null && cf.activePadCol !== null) {
+            const padInfo = cfGetPadInfo(cf.activePadRow, cf.activePadCol);
+            activeRoot = padInfo.root;
+            // Apply quality modifier to show the actual played quality's degree
+            const mk = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+            activeQuality = ChordFieldEngine.applyQualityModifier(padInfo.quality, mk);
+        }
+        if (activeRoot !== undefined && activeQuality) {
+            const degreeStr = ChordFieldEngine.getScaleDegreeLabel(activeRoot, activeQuality, cf.key, modeName);
+            degreeLabel.textContent = degreeStr || '♯/♭';
+        } else {
+            degreeLabel.textContent = '';
+        }
     }
 
     // Update auto-mod toggle button if it exists
