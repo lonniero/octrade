@@ -204,12 +204,16 @@ const chordFieldState = {
     arpDirection: 1,          // 1 = up, -1 = down (for updown mode)
     arpLastNote: null,        // last arp note played (for cleanup)
     arpNotes: [],             // computed arp note pool
-    // Ring Chord Field
-    ringMode: true,           // true = ring layout, false = classic grid
+    pendingNoteOnTimeouts: [], // timeout IDs for delayed noteOn (strum/roll/chord delay)
+    lastApproachNote: null,   // MIDI note of the last approach tone (for cleanup)
+    approachNoteTimeout: null,// timeout ID for the approach tone noteOff
+    // Ring / Diatonic Chord Field
+    ringMode: 'ring',         // 'ring' = ring layout, 'diatonic' = diatonic grid, false = classic grid
     ringActiveRoot: 0,        // currently active root pitch class (0-11)
     ringActiveQuality: 'maj7',// currently active chord quality
     ringContextChords: [],    // 16 context chord objects for outer ring
     ringSuggestions: null,     // { safe, color, surprise } for center pads
+    diatonicContextChords: [], // context chords for diatonic grid rows 3 & 6
     ringBreadcrumbs: [],      // last 8 played chords [{root, quality, name}]
     ringQualityModifier: 0,   // index into RING_QUALITY_MODIFIERS (0 = 7th default)
     prevRoot: null,           // previous chord's root pitch class (for voice leading)
@@ -230,6 +234,8 @@ const chordFieldState = {
     chordHistory: [],         // last N chords played [{root, quality, timestamp}]
     modulationLog: [],        // recent key changes [{fromKey, toKey, confidence, timestamp}]
     originalKey: 0,           // key the user originally chose (for display: "C → G")
+    justModulated: false,     // true for a few seconds after modulation (post-mod guidance)
+    justModulatedTimer: null, // timer ID for clearing justModulated
 };
 
 let scenes = [createScene(), createScene(), createScene(), createScene()];
@@ -1605,9 +1611,11 @@ function setMode(mode) {
     }
     if (mode === 'chordfield') {
         initChordFieldRhodes();
-        // Initialize ring mode on first entry (ring is the default layout)
-        if (chordFieldState.ringMode && chordFieldState.ringContextChords.length === 0) {
+        // Initialize layout mode on first entry
+        if (chordFieldState.ringMode === 'ring' && chordFieldState.ringContextChords.length === 0) {
             cfInitRingMode(chordFieldState);
+        } else if (chordFieldState.ringMode === 'diatonic' && chordFieldState.diatonicContextChords.length === 0) {
+            cfInitDiatonicMode(chordFieldState);
         }
     }
 
@@ -3372,10 +3380,10 @@ function cfPlayChordHumanized(cf, voiced) {
     if (!rhodes) return;
 
     // Cancel any pending scheduled noteOns from a previous call
-    if (cf.pendingNoteTimeouts) {
-        cf.pendingNoteTimeouts.forEach(id => clearTimeout(id));
+    if (cf.pendingNoteOnTimeouts) {
+        cf.pendingNoteOnTimeouts.forEach(id => clearTimeout(id));
     }
-    cf.pendingNoteTimeouts = [];
+    cf.pendingNoteOnTimeouts = [];
 
     // ── Chromatic approach tone on bass ──
     // If bass note changed, play a grace note a half-step below target
@@ -3387,8 +3395,17 @@ function cfPlayChordHumanized(cf, voiced) {
     if (bassChanged) {
         const approachNote = bass - 1; // chromatic below
         if (approachNote >= 28) { // keep in playable range
+            // Release any previous lingering approach note
+            if (cf.lastApproachNote !== null && cf.lastApproachNote !== undefined) {
+                rhodes.noteOff(cf.lastApproachNote);
+            }
+            cf.lastApproachNote = approachNote;
             rhodes.noteOn(approachNote, Math.round(cfGetVelocity(cf) * 0.55));
-            cf.pendingNoteTimeouts.push(setTimeout(() => rhodes.noteOff(approachNote), 80));
+            // Schedule noteOff — stored separately so cfStopPlayback can't accidentally cancel it
+            cf.approachNoteTimeout = setTimeout(() => {
+                rhodes.noteOff(approachNote);
+                if (cf.lastApproachNote === approachNote) cf.lastApproachNote = null;
+            }, 80);
         }
     }
 
@@ -3398,17 +3415,17 @@ function cfPlayChordHumanized(cf, voiced) {
     if (cf.rollMode === 'strum') {
         // Bottom-to-top stagger: 15ms between each note
         voiced.forEach((n, i) => {
-            cf.pendingNoteTimeouts.push(setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), chordDelay + i * 15));
+            cf.pendingNoteOnTimeouts.push(setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), chordDelay + i * 15));
         });
     } else if (cf.rollMode === 'roll') {
         // Random per-note delay: 5–25ms
         voiced.forEach(n => {
-            cf.pendingNoteTimeouts.push(setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), chordDelay + Math.random() * 25 + 5));
+            cf.pendingNoteOnTimeouts.push(setTimeout(() => rhodes.noteOn(n, cfGetVelocity(cf)), chordDelay + Math.random() * 25 + 5));
         });
     } else {
         // Simultaneous
         if (chordDelay > 0) {
-            cf.pendingNoteTimeouts.push(setTimeout(() => voiced.forEach(n => rhodes.noteOn(n, cfGetVelocity(cf))), chordDelay));
+            cf.pendingNoteOnTimeouts.push(setTimeout(() => voiced.forEach(n => rhodes.noteOn(n, cfGetVelocity(cf))), chordDelay));
         } else {
             voiced.forEach(n => rhodes.noteOn(n, cfGetVelocity(cf)));
         }
@@ -3438,16 +3455,38 @@ function cfStopPlayback(cf) {
     cf.arpIndex = 0;
     cf.arpDirection = 1;
 
-    // Cancel any pending strum/roll/approach noteOn timeouts
+    // Cancel any pending noteOn timeouts (strum/roll/delay)
+    if (cf.pendingNoteOnTimeouts) {
+        cf.pendingNoteOnTimeouts.forEach(id => clearTimeout(id));
+        cf.pendingNoteOnTimeouts = [];
+    }
+    // Legacy cleanup (in case old array name is still referenced)
     if (cf.pendingNoteTimeouts) {
         cf.pendingNoteTimeouts.forEach(id => clearTimeout(id));
         cf.pendingNoteTimeouts = [];
+    }
+
+    // Release any lingering approach tone immediately
+    if (cf.lastApproachNote !== null && cf.lastApproachNote !== undefined && cf.rhodes) {
+        cf.rhodes.noteOff(cf.lastApproachNote);
+        cf.lastApproachNote = null;
+    }
+    if (cf.approachNoteTimeout) {
+        clearTimeout(cf.approachNoteTimeout);
+        cf.approachNoteTimeout = null;
     }
 
     // Cancel the arp-handoff timeout
     if (cf.arpHandoffTimeout) {
         clearTimeout(cf.arpHandoffTimeout);
         cf.arpHandoffTimeout = null;
+    }
+
+    // ── Safety net: release ALL voices in the Rhodes synth ──
+    // This catches any notes that slipped through the cracks
+    // (approach tones, orphaned strums, etc.)
+    if (cf.rhodes) {
+        cf.rhodes.allNotesOff();
     }
 }
 
@@ -3773,9 +3812,13 @@ function handleChordFieldPadPress(row, col) {
         if (!cf.rhodes) return;
     }
 
-    // ── Ring mode routing ──
-    if (cf.ringMode) {
+    // ── Ring / Diatonic mode routing ──
+    if (cf.ringMode === 'ring') {
         cfHandleRingPadPress(row, col);
+        return;
+    }
+    if (cf.ringMode === 'diatonic') {
+        cfHandleDiatonicPadPress(row, col);
         return;
     }
 
@@ -4104,27 +4147,50 @@ function cfCheckAutoModulation(cf, root, quality) {
     const fromKey = cf.key;
     const toKey = result.newKey;
 
+    // Switch mode if target is major/minor
+    if (result.targetMode) {
+        const suggestedMode = ChordFieldEngine.suggestModeForKey(
+            toKey, prev.root, prev.quality, modeName, result.targetMode
+        );
+        const newModeIdx = ChordFieldEngine.MODE_ORDER.indexOf(suggestedMode);
+        if (newModeIdx >= 0 && newModeIdx !== cf.modeIndex) {
+            console.log(`🎵 Mode shift: ${modeName} → ${suggestedMode}`);
+            cf.modeIndex = newModeIdx;
+        }
+    }
+
     console.log(
         `🔀 AUTO-MODULATION: ${ChordFieldEngine.getKeyName(fromKey)} → ${ChordFieldEngine.getKeyName(toKey)} ` +
-        `(${result.confidence}) | Trigger: ${ChordFieldEngine.getChordName(prev.root, prev.quality)} → ` +
+        `(${result.confidence}, ${result.targetMode || 'same'}) | Trigger: ${ChordFieldEngine.getChordName(prev.root, prev.quality)} → ` +
         `${ChordFieldEngine.getChordName(current.root, current.quality)}`
     );
 
     // Update key
     cf.key = toKey;
 
+    // ── Post-modulation guidance ──
+    // Set justModulated flag — this tells renderers to highlight
+    // the new tonic as a "resolve here" landing pad for ~4 seconds
+    cf.justModulated = true;
+    if (cf.justModulatedTimer) clearTimeout(cf.justModulatedTimer);
+    cf.justModulatedTimer = setTimeout(() => {
+        cf.justModulated = false;
+        renderGrid();  // re-render to clear the glow
+    }, 4000);
+
     // Log the modulation
     cf.modulationLog.push({
         fromKey,
         toKey,
         confidence: result.confidence,
+        targetMode: result.targetMode,
         trigger: `${ChordFieldEngine.getChordName(prev.root, prev.quality)} → ${ChordFieldEngine.getChordName(current.root, current.quality)}`,
         timestamp: performance.now(),
     });
     // Keep last 8 modulations
     if (cf.modulationLog.length > 8) cf.modulationLog.shift();
 
-    return { modulated: true, fromKey, toKey, confidence: result.confidence };
+    return { modulated: true, fromKey, toKey, confidence: result.confidence, targetMode: result.targetMode };
 }
 
 /**
@@ -4169,10 +4235,11 @@ function cfCascadeRingUpdate(cf, newRoot, newQuality) {
     const displayQuality = ChordFieldEngine.applyQualityModifier(newQuality, modKey);
 
     if (modResult.modulated) {
-        // Show the key change in the label  
+        // Show the key + mode change in the label  
         const fromName = ChordFieldEngine.getKeyName(modResult.fromKey);
         const toName = ChordFieldEngine.getKeyName(modResult.toKey);
-        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  🔀 ${fromName}→${toName}`;
+        const modeLabel = modResult.targetMode === 'aeolian' ? 'min' : 'Maj';
+        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  🔀 ${fromName}→${toName} ${modeLabel}`;
     } else {
         cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
     }
@@ -4188,7 +4255,7 @@ function cfCascadeRingUpdate(cf, newRoot, newQuality) {
  * Initialize ring mode: set up initial state and compute first set of context chords.
  */
 function cfInitRingMode(cf) {
-    cf.ringMode = true;
+    cf.ringMode = 'ring';
     cf.ringActiveRoot = cf.key; // start on the key root
     cf.ringActiveQuality = ChordFieldEngine.getDefaultQuality(cf.key, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex]);
     cf.ringBreadcrumbs = [];
@@ -4208,9 +4275,13 @@ function cfInitRingMode(cf) {
 function renderChordFieldPad(pad, row, col) {
     const cf = chordFieldState;
 
-    // ── Ring mode rendering ──
-    if (cf.ringMode) {
+    // ── Ring / Diatonic mode rendering ──
+    if (cf.ringMode === 'ring') {
         renderRingPad(pad, row, col);
+        return;
+    }
+    if (cf.ringMode === 'diatonic') {
+        renderDiatonicPad(pad, row, col);
         return;
     }
 
@@ -4317,6 +4388,18 @@ function renderRingPad(pad, row, col) {
         if (bcIdx >= 0 && !isActiveRoot) {
             pad.style.borderColor = 'rgba(180, 200, 210, 0.5)';
             pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
+        }
+
+        // ── Post-modulation tonic glow ──
+        // After a key change, highlight the tonic as a "resolve here" landing pad
+        const isTonic = root === cf.key;
+        if (cf.justModulated && isTonic && !isActiveRoot) {
+            pad.classList.add('cf-mod-target');  // reuse the pulse animation
+            pad.style.borderColor = 'rgba(100, 255, 160, 0.9)';
+            pad.style.boxShadow = '0 0 14px rgba(100, 255, 160, 0.5), 0 0 28px rgba(100, 255, 160, 0.15)';
+            pad.style.opacity = '1';
+        } else {
+            pad.classList.remove('cf-mod-target');
         }
 
     } else if (zone === 'outer') {
@@ -4461,6 +4544,304 @@ function renderRingPad(pad, row, col) {
 
     } else {
         // Not in any zone — dark empty pad
+        pad.textContent = '';
+        pad.style.background = 'rgba(20, 25, 30, 0.2)';
+        pad.style.borderColor = 'rgba(40, 50, 60, 0.1)';
+        pad.style.boxShadow = 'none';
+        pad.style.opacity = '0.15';
+        pad.style.color = '#fff';
+    }
+}
+
+// ──────────────────────────────────────────────
+// DIATONIC CHORD FIELD — Row-based flat grid
+// ──────────────────────────────────────────────
+
+function cfInitDiatonicMode(cf) {
+    cf.ringMode = 'diatonic';
+    cf.ringActiveRoot = cf.key;
+    cf.ringActiveQuality = ChordFieldEngine.getDefaultQuality(
+        cf.key, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex]
+    );
+    cf.ringBreadcrumbs = [];
+    cf.diatonicContextChords = [];
+    cfComputeDiatonicContext(cf, cf.ringActiveRoot, cf.ringActiveQuality);
+    cf.lastChordLabel = ChordFieldEngine.getChordName(cf.ringActiveRoot, cf.ringActiveQuality);
+    console.log('[ChordField] 🎹 Diatonic mode initialized');
+}
+
+function cfGetDiatonicZone(row, col) {
+    if (row === 0) return { zone: 'breadcrumb', index: col };
+    if (row === 1) return { zone: 'utility', index: col };
+    if (row === 2 && col < 4) return { zone: 'portal', index: col };
+    if (row === 2 && col >= 4) return { zone: 'tension', index: col - 4 };
+    if (row === 3) return { zone: 'diatonic', index: col };
+    if (row === 4) return { zone: 'diatonic', index: col };
+    if (row === 5 && col < 4) return { zone: 'resolve', index: col };
+    if (row === 5 && col >= 4) return { zone: 'color', index: col - 4 };
+    if (row === 6) return { zone: 'empty', index: col };
+    if (row === 7) return { zone: 'extension', index: col };
+    return { zone: null, index: -1 };
+}
+
+function cfGetDiatonicChordInfo(cf, col) {
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    const scale = ChordFieldEngine.MODES[modeName];
+    const degreeIdx = col < 7 ? col : 0;
+    const root = (cf.key + scale[degreeIdx]) % 12;
+    const quality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
+    return { root, quality, degreeIdx };
+}
+
+function cfComputeDiatonicContext(cf, root, quality) {
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    cf.diatonicContextChords = ChordFieldEngine.computeContextChords(
+        root, quality, cf.key, modeName
+    );
+    const recentRoots = cf.ringBreadcrumbs.map(b => b.root);
+    cf.ringSuggestions = ChordFieldEngine.computeSuggestions(
+        root, quality, cf.key, modeName, recentRoots
+    );
+}
+
+function cfHandleDiatonicPadPress(row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetDiatonicZone(row, col);
+    if (!zone || zone === 'empty' || zone === 'utility') return;
+
+    let chordInfo = null;
+
+    if (zone === 'diatonic') {
+        const info = cfGetDiatonicChordInfo(cf, col);
+        chordInfo = { root: info.root, quality: info.quality, zone };
+    } else if (zone === 'resolve') {
+        const ctx = cf.diatonicContextChords?.[index];
+        if (ctx) chordInfo = { root: ctx.root, quality: ctx.quality, zone };
+    } else if (zone === 'color') {
+        const ctx = cf.diatonicContextChords?.[4 + index];
+        if (ctx) chordInfo = { root: ctx.root, quality: ctx.quality, zone };
+    } else if (zone === 'tension') {
+        const ctx = cf.diatonicContextChords?.[8 + index];
+        if (ctx) chordInfo = { root: ctx.root, quality: ctx.quality, zone };
+    } else if (zone === 'portal') {
+        const ctx = cf.diatonicContextChords?.[12 + index];
+        if (ctx) chordInfo = { root: ctx.root, quality: ctx.quality, zone };
+    } else if (zone === 'breadcrumb') {
+        const bc = cf.ringBreadcrumbs[index];
+        if (bc) chordInfo = { root: bc.root, quality: bc.quality, zone };
+        else return;
+    } else if (zone === 'extension') {
+        cf.ringQualityModifier = (cf.ringQualityModifier === index) ? 0 : index;
+        const mod = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier];
+        cf.lastChordLabel = mod.label;
+        updateChordFieldUI();
+        renderGrid();
+        return;
+    }
+
+    if (!chordInfo) return;
+
+    cfPlayRingChord(cf, chordInfo.root, chordInfo.quality);
+
+    // Row 3 = higher inversion of row 4 (shift bottom 2 notes up 12 semitones)
+    if (row === 3 && cf.activeNotes && cf.activeNotes.length >= 3) {
+        const sorted = [...cf.activeNotes].sort((a, b) => a - b);
+        const toShift = sorted.slice(0, 2); // bottom 2 notes
+        toShift.forEach(n => cf.rhodes.noteOff(n));
+        const shifted = toShift.map(n => n + 12);
+        shifted.forEach(n => cf.rhodes.noteOn(n, 80 + Math.random() * 20));
+        cf.activeNotes = cf.activeNotes
+            .filter(n => !toShift.includes(n))
+            .concat(shifted);
+        cf.prevVoicing = [...cf.activeNotes].sort((a, b) => a - b);
+    }
+
+    cfCascadeDiatonicUpdate(cf, chordInfo.root, chordInfo.quality);
+
+    cf.activePadRow = row;
+    cf.activePadCol = col;
+    updateChordFieldUI();
+    renderGrid();
+}
+
+function cfCascadeDiatonicUpdate(cf, newRoot, newQuality) {
+    const modResult = cfCheckAutoModulation(cf, newRoot, newQuality);
+
+    if (cf.ringActiveRoot !== undefined) {
+        const prevName = ChordFieldEngine.getChordName(cf.ringActiveRoot, cf.ringActiveQuality);
+        cf.ringBreadcrumbs.unshift({
+            root: cf.ringActiveRoot,
+            quality: cf.ringActiveQuality,
+            name: prevName
+        });
+        if (cf.ringBreadcrumbs.length > 8) cf.ringBreadcrumbs.length = 8;
+    }
+
+    cf.ringActiveRoot = newRoot;
+    cf.ringActiveQuality = newQuality;
+    cfComputeDiatonicContext(cf, newRoot, newQuality);
+
+    const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+    const displayQuality = ChordFieldEngine.applyQualityModifier(newQuality, modKey);
+
+    if (modResult.modulated) {
+        const fromName = ChordFieldEngine.getKeyName(modResult.fromKey);
+        const toName = ChordFieldEngine.getKeyName(modResult.toKey);
+        const modeLabel = modResult.targetMode === 'aeolian' ? 'min' : 'Maj';
+        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  🔀 ${fromName}→${toName} ${modeLabel}`;
+    } else {
+        cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
+    }
+}
+
+function renderDiatonicPad(pad, row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetDiatonicZone(row, col);
+    const isActive = (cf.activePadRow === row && cf.activePadCol === col);
+
+    pad.style.transition = 'all 0.2s ease';
+    pad.style.fontSize = '8px';
+    pad.style.fontWeight = '600';
+    pad.style.letterSpacing = '0.3px';
+
+    if (zone === 'diatonic') {
+        const info = cfGetDiatonicChordInfo(cf, col);
+        const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+        const quality = ChordFieldEngine.applyQualityModifier(info.quality, modKey);
+        const chordName = ChordFieldEngine.getChordName(info.root, quality);
+        pad.textContent = row === 3 ? chordName + '↑' : chordName;
+        const kc = getKeyColors(cf.key);
+        const isActiveRoot = info.root === cf.ringActiveRoot;
+        if (isActiveRoot || isActive) {
+            pad.style.background = kc.active;
+            pad.style.color = '#1a1a2e';
+            pad.style.borderColor = kc.borderActive;
+            pad.style.boxShadow = `0 0 16px ${kc.glowActive}`;
+            pad.style.opacity = '1';
+        } else {
+            pad.style.background = kc.diatonic;
+            pad.style.color = '#fff';
+            pad.style.borderColor = kc.border;
+            pad.style.boxShadow = `0 0 6px ${kc.glow}`;
+            pad.style.opacity = '0.9';
+        }
+        const bcIdx = cf.ringBreadcrumbs.findIndex(b => b.root === info.root);
+        if (bcIdx >= 0 && !isActiveRoot) {
+            pad.style.borderColor = 'rgba(180, 200, 210, 0.5)';
+            pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
+        }
+
+        // ── Post-modulation tonic glow ──
+        const isTonic = info.root === cf.key;
+        if (cf.justModulated && isTonic && !isActiveRoot) {
+            pad.classList.add('cf-mod-target');
+            pad.style.borderColor = 'rgba(100, 255, 160, 0.9)';
+            pad.style.boxShadow = '0 0 14px rgba(100, 255, 160, 0.5), 0 0 28px rgba(100, 255, 160, 0.15)';
+            pad.style.opacity = '1';
+        } else {
+            pad.classList.remove('cf-mod-target');
+        }
+
+    } else if (zone === 'resolve' || zone === 'color' || zone === 'tension' || zone === 'portal') {
+        let ctxIndex;
+        if (zone === 'resolve') ctxIndex = index;
+        else if (zone === 'color') ctxIndex = 4 + index;
+        else if (zone === 'tension') ctxIndex = 8 + index;
+        else ctxIndex = 12 + index;
+        const ctx = cf.diatonicContextChords?.[ctxIndex];
+        if (ctx) {
+            const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
+            const displayQ = ChordFieldEngine.applyQualityModifier(ctx.quality, modKey);
+            pad.textContent = ChordFieldEngine.getChordName(ctx.root, displayQ);
+            const colorMap = {
+                resolve: CF_RING_COLORS.outer_resolve,
+                color: CF_RING_COLORS.outer_color,
+                tension: CF_RING_COLORS.outer_tension,
+                portal: CF_RING_COLORS.outer_portal,
+            };
+            pad.style.background = colorMap[zone];
+            pad.style.color = '#fff';
+            pad.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+            pad.style.boxShadow = '0 0 6px rgba(100, 140, 180, 0.15)';
+            pad.style.opacity = isActive ? '1' : '0.85';
+
+            // ── Modulation target glow (same logic as ring mode) ──
+            const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+            pad.classList.remove('cf-mod-target');
+            if (cf.modulationEnabled && !isActive &&
+                ChordFieldEngine.isDominantQuality(ctx.quality)) {
+                const modResult = ChordFieldEngine.detectModulation(
+                    cf.ringActiveRoot, cf.ringActiveQuality,
+                    ctx.root, ctx.quality,
+                    cf.key, modeName
+                );
+                if (modResult) {
+                    const targetH = getKeyHue(modResult.newKey);
+                    pad.style.borderColor = `hsla(${targetH}, 85%, 65%, 0.9)`;
+                    pad.style.boxShadow = `0 0 10px hsla(${targetH}, 75%, 55%, 0.5), 0 0 22px hsla(${targetH}, 75%, 55%, 0.15)`;
+                    pad.classList.add('cf-mod-target');
+                }
+            }
+
+            if (isActive) {
+                pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
+                pad.style.boxShadow = '0 0 16px rgba(255, 220, 100, 0.6)';
+            }
+        } else {
+            pad.textContent = '';
+            pad.style.background = 'rgba(25, 30, 35, 0.3)';
+            pad.style.borderColor = 'rgba(40, 50, 60, 0.2)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.3';
+        }
+
+    } else if (zone === 'breadcrumb') {
+        const bc = cf.ringBreadcrumbs[index];
+        if (bc) {
+            pad.textContent = bc.name;
+            pad.style.fontSize = '7px';
+            pad.style.background = CF_RING_COLORS.breadcrumb;
+            pad.style.color = CF_RING_COLORS.breadcrumb_text;
+            pad.style.borderColor = 'rgba(80, 100, 110, 0.3)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.7';
+            if (isActive) {
+                pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
+                pad.style.boxShadow = '0 0 12px rgba(255, 220, 100, 0.4)';
+                pad.style.opacity = '1';
+            }
+        } else {
+            pad.textContent = '';
+            pad.style.background = 'rgba(20, 25, 30, 0.15)';
+            pad.style.borderColor = 'rgba(40, 50, 60, 0.1)';
+            pad.style.boxShadow = 'none';
+            pad.style.opacity = '0.15';
+        }
+
+    } else if (zone === 'extension') {
+        const mods = ChordFieldEngine.RING_QUALITY_MODIFIERS;
+        const mod = mods[index];
+        const isActiveMod = cf.ringQualityModifier === index;
+        if (mod) {
+            pad.textContent = mod.label;
+            pad.style.fontSize = '8px';
+            pad.style.fontWeight = isActiveMod ? 'bold' : 'normal';
+            if (isActiveMod) {
+                pad.style.background = 'rgba(220, 180, 50, 0.85)';
+                pad.style.color = '#111';
+                pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
+                pad.style.boxShadow = '0 0 12px rgba(220, 180, 50, 0.5)';
+                pad.style.opacity = '1';
+            } else {
+                pad.style.background = 'rgba(50, 60, 70, 0.5)';
+                pad.style.color = 'rgba(180, 200, 210, 0.7)';
+                pad.style.borderColor = 'rgba(80, 100, 110, 0.3)';
+                pad.style.boxShadow = 'none';
+                pad.style.opacity = '0.7';
+            }
+        }
+
+    } else {
         pad.textContent = '';
         pad.style.background = 'rgba(20, 25, 30, 0.2)';
         pad.style.borderColor = 'rgba(40, 50, 60, 0.1)';
@@ -4625,14 +5006,21 @@ function handleChordFieldCC(buttonIdx) {
             cf.glowGrid = null;
             console.log(`[ChordField] Mode: ${ChordFieldEngine.MODE_ORDER[cf.modeIndex]}`);
             break;
-        case 7: // Mixer — toggle ring/classic mode
-            cf.ringMode = !cf.ringMode;
-            if (cf.ringMode) {
-                cfInitRingMode(cf);
-            } else {
+        case 7: // Mixer — cycle ring/diatonic/classic mode
+            if (cf.ringMode === 'ring') {
+                cf.ringMode = 'diatonic';
+                cfInitDiatonicMode(cf);
+            } else if (cf.ringMode === 'diatonic') {
+                cf.ringMode = false;
                 cf.glowGrid = null;
+            } else {
+                cf.ringMode = 'ring';
+                cfInitRingMode(cf);
             }
-            console.log(`[ChordField] ${cf.ringMode ? '🔵 Ring' : '🔴 Classic'} mode`);
+            {
+                const _ml = { ring: '🔵 Ring', diatonic: '🎹 Diatonic' };
+                console.log(`[ChordField] ${_ml[cf.ringMode] || '🔴 Classic'} mode`);
+            }
             break;
     }
     updateChordFieldUI();
@@ -4650,9 +5038,12 @@ function handleChordFieldSideButton(index) {
 function getChordFieldLPColor(digitalRow, digitalCol) {
     const cf = chordFieldState;
 
-    // ── Ring mode LP colors ──
-    if (cf.ringMode) {
+    // ── Ring / Diatonic mode LP colors ──
+    if (cf.ringMode === 'ring') {
         return getRingChordFieldLPColor(digitalRow, digitalCol);
+    }
+    if (cf.ringMode === 'diatonic') {
+        return getDiatonicChordFieldLPColor(digitalRow, digitalCol);
     }
 
     // ── Classic grid LP colors ──
@@ -4712,6 +5103,32 @@ function getRingChordFieldLPColor(row, col) {
     }
 
     return 0; // pad not in any zone — off
+}
+
+function getDiatonicChordFieldLPColor(row, col) {
+    const cf = chordFieldState;
+    const { zone, index } = cfGetDiatonicZone(row, col);
+    const isActive = (cf.activePadRow === row && cf.activePadCol === col);
+    if (isActive) return LP_COLOR.WHITE;
+
+    if (zone === 'diatonic') {
+        const info = cfGetDiatonicChordInfo(cf, col);
+        if (info.root === cf.ringActiveRoot) return CF_RING_LP.inner_active;
+        return CF_RING_LP.inner_diatonic;
+    } else if (zone === 'resolve') {
+        return cf.diatonicContextChords?.[index] ? CF_RING_LP.outer_resolve : 0;
+    } else if (zone === 'color') {
+        return cf.diatonicContextChords?.[4 + index] ? CF_RING_LP.outer_color : 0;
+    } else if (zone === 'tension') {
+        return cf.diatonicContextChords?.[8 + index] ? CF_RING_LP.outer_tension : 0;
+    } else if (zone === 'portal') {
+        return cf.diatonicContextChords?.[12 + index] ? CF_RING_LP.outer_portal : 0;
+    } else if (zone === 'breadcrumb') {
+        return cf.ringBreadcrumbs[index] ? CF_RING_LP.breadcrumb : 0;
+    } else if (zone === 'extension') {
+        return cf.ringQualityModifier === index ? 9 : 1;
+    }
+    return 0;
 }
 
 function getChordFieldSideLPColor(index) {
@@ -4822,14 +5239,20 @@ function setupChordFieldListeners() {
     const cfRingToggle = document.getElementById('cf-ring-toggle');
     if (cfRingToggle) cfRingToggle.addEventListener('click', () => {
         const cf = chordFieldState;
-        cf.ringMode = !cf.ringMode;
-        if (cf.ringMode) {
-            cfInitRingMode(cf);
-        } else {
+        // Cycle: ring → diatonic → classic → ring
+        if (cf.ringMode === 'ring') {
+            cf.ringMode = 'diatonic';
+            cfInitDiatonicMode(cf);
+        } else if (cf.ringMode === 'diatonic') {
+            cf.ringMode = false;
             cf.glowGrid = null;
+        } else {
+            cf.ringMode = 'ring';
+            cfInitRingMode(cf);
         }
-        cfRingToggle.textContent = cf.ringMode ? '🔵 Ring' : '🟠 Grid';
-        cfRingToggle.classList.toggle('active', cf.ringMode);
+        const _labels = { ring: '🔵 Ring', diatonic: '🎹 Diatonic' };
+        cfRingToggle.textContent = _labels[cf.ringMode] || '🟠 Grid';
+        cfRingToggle.classList.toggle('active', !!cf.ringMode);
         updateChordFieldUI();
         renderGrid();
     });

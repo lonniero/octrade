@@ -1648,13 +1648,11 @@
     }
 
     /**
-     * Check if a chord could function as a predominant (ii or IV) in a given key.
+     * Check if a chord could function as a predominant (ii or IV) in a MAJOR key.
      * 
      * In major keys:
      *   ii = minor chord rooted on scale degree 2
      *   IV = major chord rooted on scale degree 4
-     * 
-     * We check all 7 modes for maximum flexibility.
      * 
      * @param {number} chordRoot - Root pitch class (0-11)
      * @param {string} chordQuality - Chord quality string
@@ -1683,6 +1681,51 @@
 
         // IV match: root matches AND quality family matches (major-family for IV)
         if (chordRoot === ivRoot && (family === ivFamily || family === 'major')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if a chord could function as a predominant in a MINOR key.
+     * 
+     * In minor keys (aeolian):
+     *   iiø = half-diminished chord on scale degree 2  (e.g., Bø7 in A minor)
+     *   iv  = minor chord on scale degree 4              (e.g., Dm in A minor)
+     *   bVI = major chord on scale degree b6              (e.g., F in A minor)
+     *   II  = major chord on degree 2 (Neapolitan area)   (e.g., Bb in A minor via bII)
+     * 
+     * @param {number} chordRoot - Root pitch class (0-11)
+     * @param {string} chordQuality - Chord quality string
+     * @param {number} targetKey - The MINOR key tonic (0-11)
+     * @returns {boolean}
+     */
+    function isPredominantInMinorKey(chordRoot, chordQuality, targetKey) {
+        const aeolian = MODES.aeolian; // [0, 2, 3, 5, 7, 8, 10]
+        const family = QUALITY_FAMILY[chordQuality] || 'major';
+
+        // iiø: half-dim on degree 2  (root = targetKey + 2)
+        const iiRoot = (targetKey + aeolian[1]) % 12;
+        if (chordRoot === iiRoot && (family === 'diminished' || family === 'minor')) {
+            return true;
+        }
+
+        // iv: minor on degree 4  (root = targetKey + 5)
+        const ivRoot = (targetKey + aeolian[3]) % 12;
+        if (chordRoot === ivRoot && (family === 'minor')) {
+            return true;
+        }
+
+        // bVI: major on degree b6  (root = targetKey + 8)
+        const bviRoot = (targetKey + aeolian[5]) % 12;
+        if (chordRoot === bviRoot && (family === 'major')) {
+            return true;
+        }
+
+        // bII (Neapolitan): major on degree b2  (root = targetKey + 1)
+        const biiRoot = (targetKey + 1) % 12;
+        if (chordRoot === biiRoot && (family === 'major')) {
             return true;
         }
 
@@ -1733,19 +1776,29 @@
             return null;
         }
 
-        // ── Step 4: Previous chord must be predominant (ii or IV) in target key ──
-        if (!isPredominantInKey(prevRoot, prevQuality, targetKey, modeName)) {
-            return null;
+        // ── Step 4a: Check MAJOR key predominants (ii→V, IV→V) ──
+        if (isPredominantInKey(prevRoot, prevQuality, targetKey, modeName)) {
+            const scale = MODES[modeName] || MODES.ionian;
+            const iiRoot = (targetKey + scale[1]) % 12;
+            const confidence = (prevRoot === iiRoot) ? 'strong' : 'moderate';
+            return { newKey: targetKey, confidence, targetMode: 'ionian' };
         }
 
-        // ── Step 5: Determine confidence ──
-        // ii→V is the strongest signal (jazz standard ii-V-I)
-        // IV→V is also strong (gospel/pop cadential approach)
-        const scale = MODES[modeName] || MODES.ionian;
-        const iiRoot = (targetKey + scale[1]) % 12;
-        const confidence = (prevRoot === iiRoot) ? 'strong' : 'moderate';
+        // ── Step 4b: Check MINOR key predominants (iiø→V, iv→V, bVI→V, bII→V) ──
+        if (isPredominantInMinorKey(prevRoot, prevQuality, targetKey)) {
+            const aeolian = MODES.aeolian;
+            const iiRoot = (targetKey + aeolian[1]) % 12;
+            const prevFamily = QUALITY_FAMILY[prevQuality] || 'major';
+            let confidence;
+            if (prevRoot === iiRoot && prevFamily === 'diminished') {
+                confidence = 'strong';   // iiø→V is the jazz minor ii-V-i
+            } else {
+                confidence = 'moderate'; // iv→V, bVI→V, bII→V
+            }
+            return { newKey: targetKey, confidence, targetMode: 'aeolian' };
+        }
 
-        return { newKey: targetKey, confidence };
+        return null;
     }
 
     /**
@@ -1761,10 +1814,11 @@
      * For now, default to ionian (major) — this can be extended later
      * to detect minor key modulations, etc.
      */
-    function suggestModeForKey(newKey, prevRoot, prevQuality, modeName) {
-        // If the target key's tonic chord would naturally be minor in the
-        // original mode context, suggest aeolian (minor)
-        // For v1, keep it simple: always use the same mode as current
+    function suggestModeForKey(newKey, prevRoot, prevQuality, modeName, targetMode) {
+        // If detectModulation returned a targetMode, use that
+        if (targetMode === 'aeolian') return 'aeolian';
+        if (targetMode === 'ionian') return 'ionian';
+        // Fallback: keep the same mode as current
         return modeName;
     }
 
@@ -1835,6 +1889,7 @@
         detectModulation,
         isDominantQuality,
         isPredominantInKey,
+        isPredominantInMinorKey,
         isRootDiatonic,
         suggestModeForKey,
     };
