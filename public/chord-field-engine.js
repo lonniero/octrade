@@ -1586,6 +1586,153 @@
     }
 
     // ──────────────────────────────────────────────
+    // AUTO-MODULATION — Seamless Key Shifting
+    // ──────────────────────────────────────────────
+    //
+    // Dylan's concept: if you play two chords in sequence that form a
+    // predominant→dominant (ii→V or IV→V) pattern in a KEY OTHER than
+    // the current one, automatically shift the tonal center to that new key.
+    //
+    // The secret: any dominant 7th chord IS the V of some key. The question
+    // is whether the chord BEFORE it confirms the journey by being ii or IV
+    // in that same target key. That two-step pattern is what makes the
+    // modulation feel inevitable — "they don't even know they're changing key."
+    //
+
+    /**
+     * Check if a chord has dominant function (contains a major 3rd + minor 7th = tritone).
+     * Any dom7-family chord qualifies.
+     */
+    function isDominantQuality(quality) {
+        return [
+            'dom7', 'dom9', 'dom11', 'dom13',
+            'dom7alt', 'dom7b9', 'dom7sharp9',
+            'dom7b5', 'dom7sharp5', 'dom7sharp11',
+        ].includes(quality);
+    }
+
+    /**
+     * Check if a chord could function as a predominant (ii or IV) in a given key.
+     * 
+     * In major keys:
+     *   ii = minor chord rooted on scale degree 2
+     *   IV = major chord rooted on scale degree 4
+     * 
+     * We check all 7 modes for maximum flexibility.
+     * 
+     * @param {number} chordRoot - Root pitch class (0-11)
+     * @param {string} chordQuality - Chord quality string
+     * @param {number} targetKey - The key we're testing against (0-11)
+     * @param {string} modeName - Current mode
+     * @returns {boolean}
+     */
+    function isPredominantInKey(chordRoot, chordQuality, targetKey, modeName) {
+        const scale = MODES[modeName] || MODES.ionian;
+        const family = QUALITY_FAMILY[chordQuality] || 'major';
+
+        // Check degree 1 (ii in ionian = scale[1])
+        const iiRoot = (targetKey + scale[1]) % 12;
+        const iiNatural = (MODE_DEGREE_TRIADS[modeName] || MODE_DEGREE_TRIADS.ionian)[1];
+        const iiFamily = QUALITY_FAMILY[iiNatural] || 'minor';
+
+        // Check degree 3 (IV in ionian = scale[3])
+        const ivRoot = (targetKey + scale[3]) % 12;
+        const ivNatural = (MODE_DEGREE_TRIADS[modeName] || MODE_DEGREE_TRIADS.ionian)[3];
+        const ivFamily = QUALITY_FAMILY[ivNatural] || 'major';
+
+        // ii match: root matches AND quality family matches (minor-family for ii)
+        if (chordRoot === iiRoot && (family === iiFamily || family === 'minor')) {
+            return true;
+        }
+
+        // IV match: root matches AND quality family matches (major-family for IV)
+        if (chordRoot === ivRoot && (family === ivFamily || family === 'major')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Detect if the last two chords form a modulation trigger.
+     * 
+     * The algorithm (from Dylan):
+     * 1. The SECOND chord (most recent) must be a dominant 7th chord
+     * 2. That dominant's root tells us: it's the V of (root - 7 semitones) = target key
+     * 3. The FIRST chord must be ii or IV in that same target key
+     * 4. The target key must be DIFFERENT from the current key
+     * 
+     * If all conditions are met → modulate to the target key.
+     * 
+     * Examples (in C major):
+     *   Am → D7  → Am is ii of G, D7 is V of G → shift to G major ✓
+     *   Dm → G7  → Dm is ii of C, G7 is V of C → no shift (already in C) ✗
+     *   F  → Bb7 → F is IV of Eb (in mixo: scale[3]), Bb is V of Eb → shift to Eb ✓
+     *   Em → A7  → Em is ii of D, A7 is V of D → shift to D major ✓
+     *   C  → A7  → C is NOT ii or IV of D → no shift (A7 is just V/ii in C) ✗
+     * 
+     * @param {number} prevRoot - Root of the chord before the current one (0-11)
+     * @param {string} prevQuality - Quality of that chord
+     * @param {number} currentRoot - Root of the chord just played (0-11)
+     * @param {string} currentQuality - Quality of that chord
+     * @param {number} currentKey - The current tonal center (0-11)
+     * @param {string} modeName - The current mode
+     * @returns {{ newKey: number, confidence: string } | null}
+     *   newKey: the pitch class to modulate to
+     *   confidence: 'strong' (ii-V) or 'moderate' (IV-V)
+     */
+    function detectModulation(prevRoot, prevQuality, currentRoot, currentQuality, currentKey, modeName) {
+        // ── Step 1: Current chord must be a dominant ──
+        if (!isDominantQuality(currentQuality)) {
+            return null;
+        }
+
+        // ── Step 2: Determine the target key ──
+        // A dominant chord resolves down a P5 to its tonic
+        // V root → tonic: subtract 7 semitones (or add 5)
+        const targetKey = (currentRoot + 5) % 12;
+
+        // ── Step 3: Target must differ from current key ──
+        if (targetKey === currentKey) {
+            return null;
+        }
+
+        // ── Step 4: Previous chord must be predominant (ii or IV) in target key ──
+        if (!isPredominantInKey(prevRoot, prevQuality, targetKey, modeName)) {
+            return null;
+        }
+
+        // ── Step 5: Determine confidence ──
+        // ii→V is the strongest signal (jazz standard ii-V-I)
+        // IV→V is also strong (gospel/pop cadential approach)
+        const scale = MODES[modeName] || MODES.ionian;
+        const iiRoot = (targetKey + scale[1]) % 12;
+        const confidence = (prevRoot === iiRoot) ? 'strong' : 'moderate';
+
+        return { newKey: targetKey, confidence };
+    }
+
+    /**
+     * Check if a chord root is diatonic in a given key and mode.
+     * Returns true if the root appears as any scale degree.
+     */
+    function isRootDiatonic(root, key, modeName) {
+        return getDiatonicDegree(root, key, modeName) >= 0;
+    }
+
+    /**
+     * Find the best mode for a new key based on the preceding context.
+     * For now, default to ionian (major) — this can be extended later
+     * to detect minor key modulations, etc.
+     */
+    function suggestModeForKey(newKey, prevRoot, prevQuality, modeName) {
+        // If the target key's tonic chord would naturally be minor in the
+        // original mode context, suggest aeolian (minor)
+        // For v1, keep it simple: always use the same mode as current
+        return modeName;
+    }
+
+    // ──────────────────────────────────────────────
     // PUBLIC API
     // ──────────────────────────────────────────────
 
@@ -1646,6 +1793,13 @@
         // Quality modifiers (small ring)
         RING_QUALITY_MODIFIERS,
         applyQualityModifier,
+
+        // Auto-modulation
+        detectModulation,
+        isDominantQuality,
+        isPredominantInKey,
+        isRootDiatonic,
+        suggestModeForKey,
     };
 
     console.log('[ChordFieldEngine] Loaded — jazz/gospel/blues harmony engine');

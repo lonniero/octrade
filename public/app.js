@@ -225,6 +225,11 @@ const chordFieldState = {
     },
     // Undo
     undoStack: [],            // [{root, quality, prevVoicing, prevRoot, ringContextChords}]
+    // Auto-Modulation
+    modulationEnabled: true,  // master toggle for auto key shifting
+    chordHistory: [],         // last N chords played [{root, quality, timestamp}]
+    modulationLog: [],        // recent key changes [{fromKey, toKey, confidence, timestamp}]
+    originalKey: 0,           // key the user originally chose (for display: "C → G")
 };
 
 let scenes = [createScene(), createScene(), createScene(), createScene()];
@@ -3793,7 +3798,10 @@ function handleChordFieldPadPress(row, col) {
     cf.activePadRow = row;
     cf.activePadCol = col;
 
-    // Compute glow for next press
+    // ── Auto-modulation check (classic grid) ──
+    const modResult = cfCheckAutoModulation(cf, root, quality);
+
+    // Compute glow for next press (using potentially updated key)
     const pitchClasses = voiced.map(n => n % 12);
     cf.glowGrid = ChordFieldEngine.computeGlowGrid(
         pitchClasses, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex], null
@@ -3801,7 +3809,13 @@ function handleChordFieldPadPress(row, col) {
 
     // Update display label
     const rootName = CF_NOTE_NAMES[root];
-    cf.lastChordLabel = `${rootName}${ChordFieldEngine.getQualitySuffix(quality)}`;
+    if (modResult.modulated) {
+        const fromName = ChordFieldEngine.getKeyName(modResult.fromKey);
+        const toName = ChordFieldEngine.getKeyName(modResult.toKey);
+        cf.lastChordLabel = `${rootName}${ChordFieldEngine.getQualitySuffix(quality)}  🔀 ${fromName}→${toName}`;
+    } else {
+        cf.lastChordLabel = `${rootName}${ChordFieldEngine.getQualitySuffix(quality)}`;
+    }
 
     updateChordFieldUI();
     renderGrid();  // renderGrid calls updateLaunchpadLEDs internally
@@ -4010,9 +4024,72 @@ function cfPlayRingChord(cf, root, quality) {
 }
 
 /**
+ * Check for auto-modulation after a chord is played.
+ * Updates cf.key if a ii→V or IV→V pattern is detected pointing to a new key.
+ * 
+ * @param {object} cf - chordFieldState
+ * @param {number} root - Root of the chord just played
+ * @param {string} quality - Quality of the chord just played
+ * @returns {{ modulated: boolean, fromKey?: number, toKey?: number, confidence?: string }}
+ */
+function cfCheckAutoModulation(cf, root, quality) {
+    if (!cf.modulationEnabled) return { modulated: false };
+
+    // Push to chord history
+    cf.chordHistory.push({ root, quality, timestamp: performance.now() });
+    // Keep only last 4 chords (we only need 2, but extra context could be useful later)
+    if (cf.chordHistory.length > 4) cf.chordHistory.shift();
+
+    // Need at least 2 chords for the two-step detection
+    if (cf.chordHistory.length < 2) return { modulated: false };
+
+    const prev = cf.chordHistory[cf.chordHistory.length - 2];
+    const current = cf.chordHistory[cf.chordHistory.length - 1];
+    const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+
+    const result = ChordFieldEngine.detectModulation(
+        prev.root, prev.quality,
+        current.root, current.quality,
+        cf.key, modeName
+    );
+
+    if (!result) return { modulated: false };
+
+    // ── MODULATE! ──
+    const fromKey = cf.key;
+    const toKey = result.newKey;
+
+    console.log(
+        `🔀 AUTO-MODULATION: ${ChordFieldEngine.getKeyName(fromKey)} → ${ChordFieldEngine.getKeyName(toKey)} ` +
+        `(${result.confidence}) | Trigger: ${ChordFieldEngine.getChordName(prev.root, prev.quality)} → ` +
+        `${ChordFieldEngine.getChordName(current.root, current.quality)}`
+    );
+
+    // Update key
+    cf.key = toKey;
+
+    // Log the modulation
+    cf.modulationLog.push({
+        fromKey,
+        toKey,
+        confidence: result.confidence,
+        trigger: `${ChordFieldEngine.getChordName(prev.root, prev.quality)} → ${ChordFieldEngine.getChordName(current.root, current.quality)}`,
+        timestamp: performance.now(),
+    });
+    // Keep last 8 modulations
+    if (cf.modulationLog.length > 8) cf.modulationLog.shift();
+
+    return { modulated: true, fromKey, toKey, confidence: result.confidence };
+}
+
+/**
  * Cascade update: recompute all ring zones after a chord is played.
+ * Now includes auto-modulation detection.
  */
 function cfCascadeRingUpdate(cf, newRoot, newQuality) {
+    // ── Auto-modulation check (BEFORE recomputing context) ──
+    const modResult = cfCheckAutoModulation(cf, newRoot, newQuality);
+
     const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
 
     // Push to breadcrumbs
@@ -4031,7 +4108,7 @@ function cfCascadeRingUpdate(cf, newRoot, newQuality) {
     cf.ringActiveRoot = newRoot;
     cf.ringActiveQuality = newQuality;
 
-    // Recompute context chords for outer ring
+    // Recompute context chords for outer ring (now in potentially NEW key)
     cf.ringContextChords = ChordFieldEngine.computeContextChords(
         newRoot, newQuality, cf.key, modeName
     );
@@ -4042,12 +4119,20 @@ function cfCascadeRingUpdate(cf, newRoot, newQuality) {
         newRoot, newQuality, cf.key, modeName, recentRoots
     );
 
-    // Update display label — show the effective quality with modifier applied
+    // Update display label
     const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
     const displayQuality = ChordFieldEngine.applyQualityModifier(newQuality, modKey);
-    cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
 
-    console.log(`🎵 Ring: ${cf.lastChordLabel} | Suggestions: ` +
+    if (modResult.modulated) {
+        // Show the key change in the label  
+        const fromName = ChordFieldEngine.getKeyName(modResult.fromKey);
+        const toName = ChordFieldEngine.getKeyName(modResult.toKey);
+        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  🔀 ${fromName}→${toName}`;
+    } else {
+        cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
+    }
+
+    console.log(`🎵 Ring: ${cf.lastChordLabel} | Key: ${ChordFieldEngine.getKeyName(cf.key)} | Suggestions: ` +
         `safe=${ChordFieldEngine.getChordName(cf.ringSuggestions.safe.root, cf.ringSuggestions.safe.quality)}, ` +
         `color=${ChordFieldEngine.getChordName(cf.ringSuggestions.color.root, cf.ringSuggestions.color.quality)}, ` +
         `surprise=${ChordFieldEngine.getChordName(cf.ringSuggestions.surprise.root, cf.ringSuggestions.surprise.quality)}`
@@ -4348,7 +4433,13 @@ function updateChordFieldUI() {
     const chordLabel = document.getElementById('cf-chord-label');
     const notesLabel = document.getElementById('cf-notes-label');
 
-    if (keyLabel) keyLabel.textContent = `${keyName} ${modeName.charAt(0).toUpperCase() + modeName.slice(1)}`;
+    // Show key with modulation indicator if key has shifted from original
+    let keyDisplay = `${keyName} ${modeName.charAt(0).toUpperCase() + modeName.slice(1)}`;
+    if (cf.modulationEnabled && cf.originalKey !== cf.key) {
+        const origName = CF_NOTE_NAMES[cf.originalKey];
+        keyDisplay += ` (from ${origName})`;
+    }
+    if (keyLabel) keyLabel.textContent = keyDisplay;
     if (modeLabel) modeLabel.textContent = modeName.charAt(0).toUpperCase() + modeName.slice(1);
     if (voicingLabel) voicingLabel.textContent = ChordFieldEngine.VOICING_TYPES[cf.voicingIndex];
     if (chordLabel) chordLabel.textContent = cf.lastChordLabel || '—';
@@ -4356,6 +4447,13 @@ function updateChordFieldUI() {
         notesLabel.textContent = cf.activeNotes.length > 0
             ? cf.activeNotes.map(n => ChordFieldEngine.midiToNoteName(n)).join(' ')
             : '';
+    }
+
+    // Update auto-mod toggle button if it exists
+    const modToggle = document.getElementById('cf-automod-toggle');
+    if (modToggle) {
+        modToggle.textContent = cf.modulationEnabled ? '🔀 Auto-Mod' : '🔒 Lock Key';
+        modToggle.classList.toggle('active', cf.modulationEnabled);
     }
 
     renderChordFieldSideButtons();
@@ -4396,16 +4494,22 @@ function handleChordFieldCC(buttonIdx) {
             break;
         case 2: // Left — key down (semitone)
             cf.key = (cf.key + 11) % 12;
+            cf.originalKey = cf.key;  // manual change = new "home" key
             cf.prevVoicing = null; // reset voice leading on key change
             cf.prevRoot = null;
             cf.glowGrid = null;
+            cf.chordHistory = [];  // clear history to prevent false modulations
+            cf.modulationLog = [];
             console.log(`[ChordField] Key: ${CF_NOTE_NAMES[cf.key]}`);
             break;
         case 3: // Right — key up (semitone)
             cf.key = (cf.key + 1) % 12;
+            cf.originalKey = cf.key;
             cf.prevVoicing = null;
             cf.prevRoot = null;
             cf.glowGrid = null;
+            cf.chordHistory = [];
+            cf.modulationLog = [];
             console.log(`[ChordField] Key: ${CF_NOTE_NAMES[cf.key]}`);
             break;
         case 4: // Session — toggle mode (back to seq)
@@ -4527,16 +4631,22 @@ function setupChordFieldListeners() {
 
     if (cfKeyDown) cfKeyDown.addEventListener('click', () => {
         chordFieldState.key = (chordFieldState.key + 11) % 12;
+        chordFieldState.originalKey = chordFieldState.key;
         chordFieldState.prevVoicing = null;
         chordFieldState.glowGrid = null;
+        chordFieldState.chordHistory = [];
+        chordFieldState.modulationLog = [];
         cfStopPlayback(chordFieldState);
         updateChordFieldUI();
         renderGrid();
     });
     if (cfKeyUp) cfKeyUp.addEventListener('click', () => {
         chordFieldState.key = (chordFieldState.key + 1) % 12;
+        chordFieldState.originalKey = chordFieldState.key;
         chordFieldState.prevVoicing = null;
         chordFieldState.glowGrid = null;
+        chordFieldState.chordHistory = [];
+        chordFieldState.modulationLog = [];
         cfStopPlayback(chordFieldState);
         updateChordFieldUI();
         renderGrid();
@@ -4626,6 +4736,18 @@ function setupChordFieldListeners() {
         cfRingToggle.classList.toggle('active', cf.ringMode);
         updateChordFieldUI();
         renderGrid();
+    });
+
+    // ── Auto-Modulation Toggle ──
+    const cfAutoModToggle = document.getElementById('cf-automod-toggle');
+    if (cfAutoModToggle) cfAutoModToggle.addEventListener('click', () => {
+        const cf = chordFieldState;
+        cf.modulationEnabled = !cf.modulationEnabled;
+        if (!cf.modulationEnabled) {
+            // When locking, clear history
+            cf.chordHistory = [];
+        }
+        updateChordFieldUI();
     });
 }
 
