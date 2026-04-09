@@ -34,10 +34,10 @@ const TRACK_COLORS_DIM = TRACK_COLORS.map(c => {
 // BIG_GRID positions in row-major 8x8 (value = row*10 + col + 11 in original)
 // We map them to [row, col] for our web grid
 const BIG_GRID_POSITIONS = [
-    [0, 3], [1, 2], [2, 1], [3, 0], // left column going down
-    [4, 0], [5, 1], [6, 2], [7, 3], // bottom-left going right
-    [7, 4], [6, 5], [5, 6], [4, 7], // right column going up
-    [3, 7], [2, 6], [1, 5], [0, 4]  // top-right going left
+    [0, 4], [1, 5], [2, 6], [3, 7], // top-right going down
+    [4, 7], [5, 6], [6, 5], [7, 4], // bottom-right going left
+    [7, 3], [6, 2], [5, 1], [4, 0], // bottom-left going up
+    [3, 0], [2, 1], [1, 2], [0, 3]  // top-left going right
 ];
 
 const INNER_GRID_POSITIONS = [
@@ -722,7 +722,7 @@ const LP_COLOR = {
 // Grid positions as MK2 note values, flipped to match digital grid orientation
 // Formula: LP note = (8 - digitalRow) * 10 + (col + 1)
 // This ensures digital row 0 (top of screen) = MK2 row 8 (top of controller)
-const LP_BIG_GRID = [84, 73, 62, 51, 41, 32, 23, 14, 15, 26, 37, 48, 58, 67, 76, 85];
+const LP_BIG_GRID = [85, 76, 67, 58, 48, 37, 26, 15, 14, 23, 32, 41, 51, 62, 73, 84];
 const LP_INNER_GRID = [74, 63, 52, 42, 33, 24, 25, 36, 47, 57, 66, 75];
 const LP_SMALL_GRID = [64, 53, 43, 34, 35, 46, 56, 65];
 const LP_MUTE_BUTTONS = [89, 79, 69, 59, 49, 39, 29, 19]; // track 0=top(89), track 7=bottom(19)
