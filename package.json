@@ -1,6 +1,7 @@
 {
     "name": "octadre-web",
     "version": "1.0.0",
+    "homepage": "https://octadre-web.pages.dev",
     "description": "Digital MIDI Sequencer — Web version of Octadre for Novation Launchpad",
     "scripts": {
         "predev": "kill -9 $(lsof -t -i :3002) 2>/dev/null; true",

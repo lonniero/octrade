@@ -25,6 +25,7 @@
         aeolian: [0, 2, 3, 5, 7, 8, 10],
         phrygian: [0, 1, 3, 5, 7, 8, 10],
         locrian: [0, 1, 3, 5, 6, 8, 10],
+        harmonic_minor: [0, 2, 3, 5, 7, 8, 11],  // Raised 7th: replaces ♭VII with leading tone
     };
 
     const MODE_LABELS = {
@@ -127,6 +128,7 @@
         aeolian: ['min', 'dim', 'maj', 'min', 'min', 'maj', 'maj'],
         phrygian: ['min', 'maj', 'maj', 'min', 'dim', 'maj', 'min'],
         locrian: ['dim', 'maj', 'min', 'min', 'maj', 'maj', 'min'],
+        harmonic_minor: ['min', 'dim', 'aug', 'min', 'maj', 'maj', 'dim'],  // i ii° III+ iv V VI vii°
     };
 
     // Natural 7th chord quality per mode degree
@@ -138,6 +140,7 @@
         aeolian: ['min7', 'halfdim7', 'maj7', 'min7', 'min7', 'maj7', 'dom7'],
         phrygian: ['min7', 'maj7', 'dom7', 'min7', 'halfdim7', 'maj7', 'min7'],
         locrian: ['halfdim7', 'maj7', 'min7', 'min7', 'maj7', 'dom7', 'min7'],
+        harmonic_minor: ['minmaj7', 'halfdim7', 'augmaj7', 'min7', 'dom7', 'maj7', 'dim7'],  // i△ iiø III+△ iv7 V7 VI△ vii°7
     };
 
     // ──────────────────────────────────────────────
@@ -305,6 +308,35 @@
         const family = QUALITY_FAMILY[quality] || 'dominant';
 
         return { root, quality, pitchClasses, name, roman, family, intervals };
+    }
+
+    /**
+     * Get diatonic chord info for a specific row type (Major or Minor).
+     * Row 3 = 'major' → always Ionian qualities & intervals.
+     * Row 4 = 'minor' → always Aeolian qualities & intervals.
+     * This enables parallel Major/Minor twins on the grid.
+     *
+     * @param {number} key - Tonal center (0-11)
+     * @param {number} col - Column index (0-7)
+     * @param {'major'|'minor'} rowType - Which parallel mode to use
+     * @returns {{ root: number, quality: string, degreeIdx: number, mode: string }}
+     */
+    function getDiatonicChordForRow(key, col, rowType) {
+        const degreeIdx = col < 7 ? col : 0;
+
+        if (rowType === 'major') {
+            // Always Ionian: Cmaj7 Dm7 Em7 Fmaj7 G7 Am7 Bm7♭5
+            const scale = MODES.ionian;
+            const root = (key + scale[degreeIdx]) % 12;
+            const quality = MODE_DEGREE_7THS.ionian[degreeIdx];
+            return { root, quality, degreeIdx, mode: 'ionian' };
+        } else {
+            // Natural minor (Aeolian): Cm7 Dm7♭5 E♭maj7 Fm7 Gm7 A♭maj7 B♭7
+            const scale = MODES.aeolian;
+            const root = (key + scale[degreeIdx]) % 12;
+            const quality = MODE_DEGREE_7THS.aeolian[degreeIdx];
+            return { root, quality, degreeIdx, mode: 'aeolian' };
+        }
     }
 
     /**
@@ -1173,7 +1205,8 @@
      */
     function getTritoneSubstitution(dominantRoot) {
         const root = (dominantRoot + 6) % 12; // tritone = 6 semitones
-        return { root, quality: 'dom7', type: 'tritone_sub' };
+        // Voiced as 3, ♭7, ♯9 (drop the 5th) — the "hip" tritone sub voicing
+        return { root, quality: 'dom7sharp9', type: 'tritone_sub' };
     }
 
     /**
@@ -1357,9 +1390,15 @@
      * @param {string} currentQuality - Current chord quality
      * @param {number} key - Current key (0-11)
      * @param {string} modeName - Current mode name
+     * @param {object} [options] - Optional settings
+     * @param {'major'|'minor'|null} [options.borrowFrom] - Override which parallel mode
+     *   to borrow from for the Borrowed quadrant (pads 4-7).
+     *   'major' = show major borrowed chords (I, III, IV, VI) — used when playing Minor row.
+     *   'minor' = show minor borrowed chords (♭I, ♭III, ♭IV, ♭VI) — used when playing Major row.
+     *   null/undefined = auto-detect from modeName (legacy behavior).
      * @returns {Array<{root, quality, type, quadrant, role, label}>} 16 context chord objects
      */
-    function computeContextChords(currentRoot, currentQuality, key, modeName) {
+    function computeContextChords(currentRoot, currentQuality, key, modeName, options) {
         const scale = MODES[modeName] || MODES.ionian;
         const degree7ths = MODE_DEGREE_7THS[modeName] || MODE_DEGREE_7THS.ionian;
         const currentDegree = getDiatonicDegree(currentRoot, key, modeName);
@@ -1378,186 +1417,260 @@
 
         // ═══════════════════════════════════════════════
         // QUADRANT 1: RESOLVE (pads 0-3) — "where to land"
+        //   Contextual to major/minor key:
+        //     Minor: biases toward ♭III and ♭VI (common-tone rich)
+        //     Major (tonic): biases toward vi and iii
+        //     Major (predominant): prefers IV over ii
+        //   4th slot: common-tone fallback — best unused diatonic match
         // ═══════════════════════════════════════════════
         const resolve = [];
+        const isMinorResolve = options?.borrowFrom === 'major';
+        // borrowFrom='major' means minor row was last played
 
-        // Pad 0: Strongest functional resolution from current chord
-        if (currentDegree === 4) {
-            // On V → resolve to I
-            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
-        } else if (currentDegree === 1) {
-            // On ii → go to V
-            resolve.push(makeChord((key + scale[4]) % 12, degree7ths[4], 'resolve', 'resolution'));
-        } else if (currentDegree === 0) {
-            // On I → ii (start a ii-V)
-            resolve.push(makeChord((key + scale[1]) % 12, degree7ths[1], 'resolve', 'resolution'));
-        } else if (currentDegree >= 0) {
-            // Other diatonic: resolve down a 5th (circle of 5ths motion)
-            const targetDeg = (currentDegree + 3) % 7;
-            resolve.push(makeChord((key + scale[targetDeg]) % 12, degree7ths[targetDeg], 'resolve', 'resolution'));
-        } else {
-            // Non-diatonic: resolve down semitone to nearest diatonic
-            let resolved = false;
-            for (let offset = 1; offset <= 6; offset++) {
-                const tryRoot = (currentRoot - offset + 12) % 12;
-                const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
-                if (tryDeg >= 0) {
-                    resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
-                    resolved = true;
-                    break;
+        // Helper: compute common-tone count between current chord and a candidate
+        function commonToneCount(candidateRoot, candidateQuality) {
+            const currentPCs = buildChordPitchClasses(currentRoot, currentQuality);
+            const candidatePCs = buildChordPitchClasses(candidateRoot, candidateQuality);
+            let count = 0;
+            for (const pc of currentPCs) {
+                if (candidatePCs.includes(pc)) count++;
+            }
+            return count;
+        }
+
+        // Helper: add a resolve chord if not already used and not current root
+        function tryPush(root, quality, role) {
+            if (root !== currentRoot && !resolve.some(c => c.root === root)) {
+                resolve.push(makeChord(root, quality, 'resolve', role));
+                return true;
+            }
+            return false;
+        }
+
+        if (isMinorResolve) {
+            // ── Minor context resolve ──
+            const minScale = MODES.harmonic_minor;
+            const min7ths = MODE_DEGREE_7THS.harmonic_minor;
+
+            // Pad 0: Strongest functional resolution
+            if (currentDegree === 4) {
+                // V → i
+                tryPush(key, min7ths[0], 'resolution');
+            } else if (currentDegree === 0) {
+                // i → V (dominant from harmonic minor)
+                tryPush((key + minScale[4]) % 12, min7ths[4], 'resolution');
+            } else if (currentDegree >= 0) {
+                // Other: circle-of-5ths resolution
+                const targetDeg = (currentDegree + 3) % 7;
+                tryPush((key + minScale[targetDeg]) % 12, min7ths[targetDeg], 'resolution');
+            } else {
+                // Non-diatonic: stepwise approach to nearest diatonic
+                let resolved = false;
+                for (let offset = 1; offset <= 6; offset++) {
+                    const tryRoot = (currentRoot - offset + 12) % 12;
+                    const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
+                    if (tryDeg >= 0) {
+                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
+                        resolved = true;
+                        break;
+                    }
+                }
+                if (!resolved) resolve.push(makeChord(key, min7ths[0], 'resolve', 'resolution'));
+            }
+
+            // Pad 1: ♭VI — major chord, strong common-tone with minor chords
+            tryPush((key + minScale[5]) % 12, min7ths[5], '♭VI') ||
+                tryPush((key + minScale[3]) % 12, min7ths[3], 'iv');
+
+            // Pad 2: ♭III — relative major, tonic function
+            tryPush((key + minScale[2]) % 12, min7ths[2], '♭III') ||
+                tryPush((key + minScale[4]) % 12, min7ths[4], 'V');
+
+            // Pad 3: Fallback — best remaining common-tone match
+            if (resolve.length < 4) {
+                const usedRoots = new Set(resolve.map(c => c.root));
+                usedRoots.add(currentRoot);
+                let bestDeg = -1, bestScore = -1;
+                for (let d = 0; d < 7; d++) {
+                    const r = (key + minScale[d]) % 12;
+                    if (usedRoots.has(r)) continue;
+                    const score = commonToneCount(r, min7ths[d]);
+                    if (score > bestScore) { bestScore = score; bestDeg = d; }
+                }
+                if (bestDeg >= 0) {
+                    tryPush((key + minScale[bestDeg]) % 12, min7ths[bestDeg], 'common-tone');
+                } else {
+                    // Ultimate fallback: tonic
+                    resolve.push(makeChord(key, min7ths[0], 'resolve', 'tonic'));
                 }
             }
-            if (!resolved) resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
-        }
 
-        // Pad 1: IV chord (plagal / subdominant)
-        const ivRoot = (key + scale[3]) % 12;
-        if (ivRoot !== currentRoot && ivRoot !== resolve[0]?.root) {
-            resolve.push(makeChord(ivRoot, degree7ths[3], 'resolve', 'plagal'));
         } else {
-            // If IV is current or same as resolution, use V instead
-            const vRoot = (key + scale[4]) % 12;
-            resolve.push(makeChord(vRoot, degree7ths[4], 'resolve', 'dominant'));
-        }
+            // ── Major context resolve ──
 
-        // Pad 2: vi chord (deceptive resolution)
-        const viRoot = (key + scale[5]) % 12;
-        const viUsed = resolve.some(c => c.root === viRoot) || viRoot === currentRoot;
-        if (!viUsed) {
-            resolve.push(makeChord(viRoot, degree7ths[5], 'resolve', 'deceptive'));
-        } else {
-            // Fallback: iii chord
-            const iiiRoot = (key + scale[2]) % 12;
-            resolve.push(makeChord(iiiRoot, degree7ths[2], 'resolve', 'mediant'));
-        }
-
-        // Pad 3: I chord (home / tonic)
-        if (key !== currentRoot && !resolve.some(c => c.root === key)) {
-            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
-        } else {
-            // If tonic already used, use ii chord
-            const iiRoot = (key + scale[1]) % 12;
-            if (!resolve.some(c => c.root === iiRoot) && iiRoot !== currentRoot) {
-                resolve.push(makeChord(iiRoot, degree7ths[1], 'resolve', 'supertonic'));
+            // Pad 0: Strongest functional resolution from current chord
+            if (currentDegree === 4) {
+                // On V → resolve to I
+                tryPush(key, degree7ths[0], 'resolution');
+            } else if (currentDegree === 1) {
+                // On ii → go to V
+                tryPush((key + scale[4]) % 12, degree7ths[4], 'resolution');
+            } else if (currentDegree === 0) {
+                // On I → vi (tonic function partner, bias rule)
+                tryPush((key + scale[5]) % 12, degree7ths[5], 'vi') ||
+                    tryPush((key + scale[1]) % 12, degree7ths[1], 'resolution');
+            } else if (currentDegree >= 0) {
+                // Other diatonic: resolve down a 5th (circle of 5ths motion)
+                const targetDeg = (currentDegree + 3) % 7;
+                tryPush((key + scale[targetDeg]) % 12, degree7ths[targetDeg], 'resolution');
             } else {
-                const vRoot = (key + scale[4]) % 12;
-                resolve.push(makeChord(vRoot, degree7ths[4], 'resolve', 'dominant'));
+                // Non-diatonic: resolve down semitone to nearest diatonic
+                let resolved = false;
+                for (let offset = 1; offset <= 6; offset++) {
+                    const tryRoot = (currentRoot - offset + 12) % 12;
+                    const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
+                    if (tryDeg >= 0) {
+                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
+                        resolved = true;
+                        break;
+                    }
+                }
+                if (!resolved) resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
+            }
+
+            // Pad 1: iii (mediant — tonic function, common-tone with I and vi)
+            const iiiRoot = (key + scale[2]) % 12;
+            tryPush(iiiRoot, degree7ths[2], 'mediant') ||
+                tryPush((key + scale[3]) % 12, degree7ths[3], 'plagal');
+
+            // Pad 2: IV preferred (predominant bias rule: IV over ii)
+            const ivRoot = (key + scale[3]) % 12;
+            if (!resolve.some(c => c.root === ivRoot)) {
+                tryPush(ivRoot, degree7ths[3], 'plagal') ||
+                    tryPush((key + scale[4]) % 12, degree7ths[4], 'dominant');
+            } else {
+                // IV already used, offer V instead
+                tryPush((key + scale[4]) % 12, degree7ths[4], 'dominant') ||
+                    tryPush((key + scale[1]) % 12, degree7ths[1], 'supertonic');
+            }
+
+            // Pad 3: Fallback — best remaining common-tone match or tonic
+            if (resolve.length < 4) {
+                if (key !== currentRoot && !resolve.some(c => c.root === key)) {
+                    resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+                } else {
+                    const usedRoots = new Set(resolve.map(c => c.root));
+                    usedRoots.add(currentRoot);
+                    let bestDeg = -1, bestScore = -1;
+                    for (let d = 0; d < 7; d++) {
+                        const r = (key + scale[d]) % 12;
+                        if (usedRoots.has(r)) continue;
+                        const score = commonToneCount(r, degree7ths[d]);
+                        // Prefer subdominant function (degree 3 = IV) on ties
+                        if (score > bestScore || (score === bestScore && d === 3)) {
+                            bestScore = score; bestDeg = d;
+                        }
+                    }
+                    if (bestDeg >= 0) {
+                        tryPush((key + scale[bestDeg]) % 12, degree7ths[bestDeg], 'common-tone');
+                    } else {
+                        resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+                    }
+                }
             }
         }
 
+        // Safety: ensure exactly 4 resolve chords
+        while (resolve.length < 4) {
+            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+        }
+
         // ═══════════════════════════════════════════════
-        // QUADRANT 2: COLOR (pads 4-7) — "same energy, different shade"
+        // QUADRANT 2: BORROWED (pads 4-7) — Fixed modal interchange
+        //   Reactive to the last-pressed diatonic row:
+        //   Playing Major row → borrowFrom='minor' → show ♭I ♭III ♭IV ♭VI
+        //   Playing Minor row → borrowFrom='major' → show I III IV VI
+        //   Fallback: auto-detect from modeName.
         // ═══════════════════════════════════════════════
         const color = [];
-        const neoR = getNeoRiemannian(currentRoot, currentQuality);
+        const borrowFrom = options?.borrowFrom;
+        // If borrowFrom is explicitly set, use it; otherwise auto-detect from mode
+        const showMinorBorrowed = borrowFrom
+            ? (borrowFrom === 'minor')
+            : ['ionian', 'lydian', 'mixolydian'].includes(modeName);
 
-        // Pad 4: Parallel (P) — flip major↔minor
-        color.push(makeChord(neoR.P.root, neoR.P.quality, 'color', 'parallel'));
-
-        // Pad 5: Relative (R) — relative major/minor
-        if (neoR.R.root !== neoR.P.root) {
-            color.push(makeChord(neoR.R.root, neoR.R.quality, 'color', 'relative'));
+        if (showMinorBorrowed) {
+            // In major: borrow from parallel minor
+            // Pad 4 → ♭I  (e.g., Cm in C major)
+            color.push(makeChord(key, 'min7', 'color', 'bI'));
+            // Pad 5 → ♭III (e.g., E♭maj7 in C major)
+            color.push(makeChord((key + 3) % 12, 'maj7', 'color', 'bIII'));
+            // Pad 6 → ♭IV  (e.g., Fm7 in C major → aeolian degree 3)
+            color.push(makeChord((key + 5) % 12, 'min7', 'color', 'bIV'));
+            // Pad 7 → ♭VI  (e.g., A♭maj7 in C major)
+            color.push(makeChord((key + 8) % 12, 'maj7', 'color', 'bVI'));
         } else {
-            // Fallback: chromatic mediant (M3 up with same quality)
-            color.push(makeChord((currentRoot + 4) % 12, currentQuality, 'color', 'mediant_up'));
-        }
-
-        // Pad 6: Leading tone (L) — Neo-Riemannian L transform
-        if (neoR.L.root !== neoR.P.root && neoR.L.root !== neoR.R.root) {
-            color.push(makeChord(neoR.L.root, neoR.L.quality, 'color', 'leading_tone'));
-        } else {
-            // Fallback: chromatic mediant (m3 up)
-            color.push(makeChord((currentRoot + 3) % 12, 'min7', 'color', 'mediant_m3'));
-        }
-
-        // Pad 7: Modal borrow — strongest borrowed chord from parallel key
-        const miChords = getModalInterchange(key, modeName);
-        const unusedMi = miChords.filter(c =>
-            c.root !== currentRoot &&
-            !color.some(cc => cc.root === c.root)
-        );
-        if (unusedMi.length > 0) {
-            // Prefer iv (in major) or IV (in minor) — the most iconic borrow
-            const borrowDeg3 = unusedMi.find(c => c.degree === 3); // iv / IV
-            const chosen = borrowDeg3 || unusedMi[0];
-            color.push(makeChord(chosen.root, chosen.quality, 'color', 'modal_borrow'));
-        } else {
-            // Fallback: chromatic mediant down (M3 down)
-            color.push(makeChord((currentRoot + 8) % 12, 'maj7', 'color', 'mediant_down'));
+            // In minor: borrow from parallel major
+            // Pad 4 → I   (e.g., C in Cm → major tonic)
+            color.push(makeChord(key, 'maj7', 'color', 'I'));
+            // Pad 5 → III (e.g., Em in Cm → major mediant)
+            color.push(makeChord((key + 4) % 12, 'min7', 'color', 'III'));
+            // Pad 6 → IV  (e.g., F in Cm → major subdominant)
+            color.push(makeChord((key + 5) % 12, 'maj7', 'color', 'IV'));
+            // Pad 7 → VI  (e.g., Am in Cm → major submediant)
+            color.push(makeChord((key + 9) % 12, 'min7', 'color', 'VI'));
         }
 
         // ═══════════════════════════════════════════════
-        // QUADRANT 3: TENSION (pads 8-11) — "build expectation"
+        // QUADRANT 3: TENSION (pads 8-11) — Secondary dominants (NO key change)
+        //   These create harmonic tension without modulating.
+        //   Each pad is V7 of a specific diatonic target.
+        //   Contextual to active key:
+        //     Major: V/ii, V/iii, V/V, V/vi
+        //     Minor: V/III, V/iv, V/v, V/VI
         // ═══════════════════════════════════════════════
         const tension = [];
+        const isMinorContext = options?.borrowFrom === 'major';
+        // borrowFrom='major' means minor row was last played (minor borrows from major)
 
-        // Pad 8: Secondary dominant — V7 that resolves TO the current chord
-        const secDomOfCurrent = getSecondaryDominant(currentRoot);
-        tension.push(makeChord(secDomOfCurrent.root, secDomOfCurrent.quality, 'tension', 'secondary_dominant'));
-
-        // Pad 9: Tritone sub of V — chromatic approach to current key's tonic
-        const primaryV = (key + scale[4]) % 12;
-        const triSubV = getTritoneSubstitution(primaryV);
-        if (triSubV.root !== secDomOfCurrent.root && triSubV.root !== currentRoot) {
-            tension.push(makeChord(triSubV.root, triSubV.quality, 'tension', 'tritone_sub'));
+        let secTargets, secLabels, secLabelsPortal;
+        if (isMinorContext) {
+            // Minor key context: V/III, V/iv, V/v, V/VI
+            const minScale = MODES.harmonic_minor;
+            secTargets = [
+                (key + minScale[2]) % 12,  // III (♭3)
+                (key + minScale[3]) % 12,  // iv (4)
+                (key + minScale[4]) % 12,  // v (5)
+                (key + minScale[5]) % 12,  // VI (♭6)
+            ];
+            secLabels = ['V/III', 'V/iv', 'V/v', 'V/VI'];
+            secLabelsPortal = ['V/III_mod', 'V/iv_mod', 'V/v_mod', 'V/VI_mod'];
         } else {
-            // Tritone sub of the current chord's dominant
-            const triSubCurrent = getTritoneSubstitution(secDomOfCurrent.root);
-            tension.push(makeChord(triSubCurrent.root, triSubCurrent.quality, 'tension', 'tritone_sub'));
+            // Major key context (default): V/ii, V/iii, V/V, V/vi
+            secTargets = [
+                (key + scale[1]) % 12,  // ii
+                (key + scale[2]) % 12,  // iii
+                (key + scale[4]) % 12,  // V
+                (key + scale[5]) % 12,  // vi
+            ];
+            secLabels = ['V/ii', 'V/iii', 'V/V', 'V/vi'];
+            secLabelsPortal = ['V/ii_mod', 'V/iii_mod', 'V/V_mod', 'V/vi_mod'];
         }
 
-        // Pad 10: V7/ii — secondary dominant of ii (sets up the classic ii-V)
-        const iiRoot = (key + scale[1]) % 12;
-        const secDomOfII = getSecondaryDominant(iiRoot);
-        if (secDomOfII.root !== currentRoot && !tension.some(c => c.root === secDomOfII.root)) {
-            tension.push(makeChord(secDomOfII.root, secDomOfII.quality, 'tension', 'secondary_dom_ii'));
-        } else {
-            // V7/vi — secondary dominant of vi
-            const viRoot2 = (key + scale[5]) % 12;
-            const secDomOfVI = getSecondaryDominant(viRoot2);
-            tension.push(makeChord(secDomOfVI.root, secDomOfVI.quality, 'tension', 'secondary_dom_vi'));
-        }
-
-        // Pad 11: Dominant chain next — next dom7 in circle of 5ths from current position
-        const domChainRoot = (currentRoot + 5) % 12; // down a 5th = up a 4th
-        if (domChainRoot !== currentRoot && !tension.some(c => c.root === domChainRoot)) {
-            tension.push(makeChord(domChainRoot, 'dom7', 'tension', 'dominant_chain'));
-        } else {
-            // Chain the other direction (up a 5th)
-            const domChainUp = (currentRoot + 7) % 12;
-            tension.push(makeChord(domChainUp, 'dom7', 'tension', 'dominant_chain'));
+        const secDoms = secTargets.map(t => getSecondaryDominant(t));
+        for (let i = 0; i < 4; i++) {
+            tension.push(makeChord(secDoms[i].root, 'dom7', 'tension', secLabels[i]));
         }
 
         // ═══════════════════════════════════════════════
-        // QUADRANT 4: PORTAL (pads 12-15) — "jump across the circle"
+        // QUADRANT 4: PORTAL (pads 12-15) — Same secondary dominants WITH key change
+        //   These are the same V/x chords as Tension, but pressing
+        //   them WILL trigger auto-modulation to the target key.
         // ═══════════════════════════════════════════════
         const portal = [];
-
-        // Pad 12: Coltrane jump — M3 up (Giant Steps direction)
-        const coltraneUp = (currentRoot + 4) % 12;
-        const coltraneUpQ = getDefaultQuality(coltraneUp, key, modeName);
-        // Use maj7 for the Coltrane sound if not diatonic
-        portal.push(makeChord(coltraneUp,
-            getDiatonicDegree(coltraneUp, key, modeName) >= 0 ? coltraneUpQ : 'maj7',
-            'portal', 'coltrane_up'));
-
-        // Pad 13: Coltrane jump — M3 down (other Giant Steps direction)
-        const coltraneDown = (currentRoot + 8) % 12;
-        const coltraneDownQ = getDefaultQuality(coltraneDown, key, modeName);
-        portal.push(makeChord(coltraneDown,
-            getDiatonicDegree(coltraneDown, key, modeName) >= 0 ? coltraneDownQ : 'maj7',
-            'portal', 'coltrane_down'));
-
-        // Pad 14: Chromatic slide — semitone up, same quality family
-        const slideRoot = (currentRoot + 1) % 12;
-        const slideQ = getDefaultQuality(slideRoot, key, modeName);
-        portal.push(makeChord(slideRoot,
-            getDiatonicDegree(slideRoot, key, modeName) >= 0 ? slideQ : currentQuality,
-            'portal', 'chromatic_slide'));
-
-        // Pad 15: Diminished bridge — dim7 chord that connects to 4 keys
-        const dimRoot = (currentRoot + 11) % 12; // vii°7 of current chord (leading tone)
-        portal.push(makeChord(dimRoot, 'dim7', 'portal', 'diminished_bridge'));
+        for (let i = 0; i < 4; i++) {
+            portal.push(makeChord(secDoms[i].root, 'dom7', 'portal', secLabelsPortal[i]));
+        }
 
         // ═══════════════════════════════════════════════
         // Combine all 4 quadrants into the 16-pad array
@@ -1823,6 +1936,248 @@
     }
 
     // ──────────────────────────────────────────────
+    // RESOLUTION GUIDES — highlight diatonic targets for secondary dominants
+    // ──────────────────────────────────────────────
+
+    /**
+     * For a given secondary dominant role, return the pitch classes (0-11) of
+     * its expected resolution targets on the diatonic row.
+     *
+     * Each V/x or vii°/x has:
+     *   primary   — the chord it "wants" to resolve to (x itself)
+     *   deceptive — the surprise alternative (step above x, or special case)
+     *   other     — a third common option (often IV or I)
+     *
+     * @param {string} role - e.g. 'V/ii', 'V/vi', 'vii°/III', etc.
+     * @param {number} key  - tonal center (0-11)
+     * @param {string} modeName - current mode
+     * @param {object} [options] - same as computeContextChords
+     * @returns {{ primary: number, deceptive: number, other: number|null } | null}
+     */
+    function getResolutionGuides(role, key, modeName, options) {
+        const isMinorContext = options?.borrowFrom === 'major';
+
+        // Strip _mod suffix (portal roles) — same resolution targets
+        const cleanRole = role.replace('_mod', '');
+
+        // Degree-index maps: { primary, deceptive, other }
+        // Indices refer to the diatonic scale degree (0=I, 1=ii, 2=iii, etc.)
+        const majorMap = {
+            'V/ii':    { primary: 1, deceptive: 2, other: 3 },    // ii → iii, IV
+            'V/iii':   { primary: 2, deceptive: 3, other: null },  // iii → IV
+            'V/V':     { primary: 4, deceptive: 5, other: 3 },    // V → vi, IV
+            'V/vi':    { primary: 5, deceptive: 3, other: 0 },    // vi → IV (not vii°), I
+            'vii°/ii': { primary: 1, deceptive: 2, other: 3 },
+            'vii°/iii':{ primary: 2, deceptive: 3, other: null },
+            'vii°/V':  { primary: 4, deceptive: 5, other: 3 },
+            'vii°/vi': { primary: 5, deceptive: 3, other: 0 },
+            'V':       { primary: 0, deceptive: 5, other: 3 },    // I, vi, IV
+            'vii°':    { primary: 0, deceptive: 5, other: 3 },
+        };
+
+        const minorMap = {
+            'V/III':   { primary: 2, deceptive: 3, other: null },  // III → iv
+            'V/iv':    { primary: 3, deceptive: 4, other: null },  // iv → v
+            'V/v':     { primary: 4, deceptive: 5, other: null },  // v → VI
+            'V/VI':    { primary: 5, deceptive: 6, other: 0 },    // VI → ♭VII, i
+            'vii°/III':{ primary: 2, deceptive: 3, other: null },
+            'vii°/iv': { primary: 3, deceptive: 4, other: null },
+            'vii°/v':  { primary: 4, deceptive: 5, other: null },
+            'vii°/VI': { primary: 5, deceptive: 6, other: 0 },
+            'V':       { primary: 0, deceptive: 5, other: 3 },    // i, VI, iv
+            'vii°':    { primary: 0, deceptive: 5, other: 3 },
+        };
+
+        const mapping = isMinorContext
+            ? minorMap[cleanRole]
+            : majorMap[cleanRole];
+
+        if (!mapping) return null;
+
+        // Use the appropriate scale for root computation
+        const scale = isMinorContext
+            ? MODES.aeolian
+            : (MODES[modeName] || MODES.ionian);
+
+        const result = {
+            primary: (key + scale[mapping.primary]) % 12,
+            deceptive: (key + scale[mapping.deceptive]) % 12,
+            other: null,
+        };
+        if (mapping.other !== null) {
+            result.other = (key + scale[mapping.other]) % 12;
+        }
+        return result;
+    }
+
+    // ──────────────────────────────────────────────
+    // ADVANCED RESOLUTION GUIDES — for color_2nd (Neapolitan, Aug6, TT sub)
+    // ──────────────────────────────────────────────
+
+    /**
+     * Return resolution targets for advanced borrowed chords (color_2nd zone).
+     *
+     *   N6    → primary: V,  deceptive: vii° (leading tone), other: I (cadential)
+     *   Ger+6 → primary: V,  deceptive: I (cadential 6/4),   other: vi (deceptive)
+     *   Fr+6  → primary: V,  deceptive: I (cadential 6/4),   other: null
+     *   TT    → primary: I,  deceptive: vi,                   other: V
+     *
+     * @param {string} role - 'N6', 'Ger+6', 'Fr+6', 'TT'
+     * @param {number} key  - tonal center (0-11)
+     * @returns {{ primary: number, deceptive: number, other: number|null } | null}
+     */
+    function getAdvancedResolutionGuides(role, key) {
+        const I  = key;
+        const V  = (key + 7) % 12;
+        const vi = (key + 9) % 12;
+        const viiDeg = (key + 11) % 12;
+        const iv = (key + 5) % 12;
+
+        switch (role) {
+            case 'N6':
+                // Neapolitan is a pre-dominant: ♭II → V (primary),
+                // can pass through vii° (deceptive), or cadential I6/4 (other)
+                return { primary: V, deceptive: viiDeg, other: I };
+
+            case 'Ger+6':
+                // German +6 → V (primary), through cadential I6/4 to avoid ∥5ths (deceptive),
+                // or deceptive motion to vi (other)
+                return { primary: V, deceptive: I, other: vi };
+
+            case 'Fr+6':
+                // French +6 → V (primary, most directed of the three),
+                // through cadential I6/4 (deceptive)
+                return { primary: V, deceptive: I, other: null };
+
+            case 'TT':
+                // Tritone sub REPLACES V — resolves down a half step to I (primary),
+                // deceptive to vi, or back to V as a passing chord
+                return { primary: I, deceptive: vi, other: V };
+
+            default:
+                return null;
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // 2ND-ROW CHORD GENERATORS
+    // ──────────────────────────────────────────────
+
+    /**
+     * Compute sus-chord options for the Green 2nd row (resolve_2nd).
+     * These use a 2nd-inversion triad voicing over a pedal bass.
+     * Static behavior — same in both major and minor contexts.
+     *
+     * @param {number} key - Tonal center (0-11)
+     * @returns {Array<{root, quality, bass, label, role}>} 4 sus chord objects
+     */
+    function computeSusChords(key) {
+        // Sus chords: scale degree in bass, triad in 2nd inversion above
+        // All relative to the key
+        return [
+            { root: key, quality: 'sus2', bass: (key + 2) % 12, label: getChordName(key, 'sus2'), role: 'sus2',
+              voicingRule: '2nd_inv', triadAbove: { root: (key + 2) % 12, quality: 'maj' } },
+            { root: key, quality: 'sus4', bass: (key + 5) % 12, label: getChordName(key, 'sus4'), role: 'sus4',
+              voicingRule: '2nd_inv', triadAbove: { root: (key + 3) % 12, quality: 'maj' } },
+            { root: (key + 7) % 12, quality: 'sus2', bass: (key + 9) % 12, label: getChordName((key + 7) % 12, 'sus2'), role: 'sus5',
+              voicingRule: '2nd_inv', triadAbove: { root: (key + 9) % 12, quality: 'maj' } },
+            { root: (key + 9) % 12, quality: 'sus4', bass: (key + 2) % 12, label: getChordName((key + 9) % 12, 'sus4'), role: 'sus6',
+              voicingRule: '2nd_inv', triadAbove: { root: (key + 0) % 12, quality: 'maj' } },
+        ];
+    }
+
+    /**
+     * Compute secondary diminished 7th chords for tension_2nd / portal_2nd rows.
+     * These are vii°7/x — leading-tone diminished 7ths of each target.
+     * Contextual to major/minor key.
+     *
+     * @param {number} key - Tonal center (0-11)
+     * @param {string} modeName - Current mode
+     * @param {object} [options] - Same options as computeContextChords
+     * @returns {Array<{root, quality, role, label}>} 4 chord objects
+     */
+    function computeSecondary7ths(key, modeName, options) {
+        const isMinorContext = options?.borrowFrom === 'major';
+        const scale = MODES[modeName] || MODES.ionian;
+
+        let targets, labels;
+        if (isMinorContext) {
+            const minScale = MODES.harmonic_minor;
+            targets = [
+                (key + minScale[2]) % 12,  // III
+                (key + minScale[3]) % 12,  // iv
+                (key + minScale[4]) % 12,  // v
+                (key + minScale[5]) % 12,  // VI
+            ];
+            labels = ['vii°/III', 'vii°/iv', 'vii°/v', 'vii°/VI'];
+        } else {
+            targets = [
+                (key + scale[1]) % 12,  // ii
+                (key + scale[2]) % 12,  // iii
+                (key + scale[4]) % 12,  // V
+                (key + scale[5]) % 12,  // vi
+            ];
+            labels = ['vii°/ii', 'vii°/iii', 'vii°/V', 'vii°/vi'];
+        }
+
+        return targets.map((target, i) => {
+            // Leading tone dim7 = root is a half-step below the target
+            const ltRoot = (target + 11) % 12;
+            return {
+                root: ltRoot,
+                quality: 'dim7',
+                role: labels[i],
+                label: getChordName(ltRoot, 'dim7'),
+            };
+        });
+    }
+
+    /**
+     * Compute advanced borrowed chords for the Gold 2nd row (color_2nd).
+     * Neapolitan, German +6, French +6, Tritone Sub.
+     * Augmented 6th chords resolve to V7 (visual flash cue handled in UI).
+     * No key modulation triggered.
+     *
+     * @param {number} key - Tonal center (0-11)
+     * @param {string} modeName - Current mode
+     * @returns {Array<{root, quality, label, role, resolvesTo}>} 4 chord objects
+     */
+    function computeAdvancedBorrowed(key, modeName) {
+        const V = (key + 7) % 12;
+        const bII = (key + 1) % 12;
+        const bVI = (key + 8) % 12;
+
+        return [
+            // Pad 0: Neapolitan — ♭II major (first inversion in classical, root pos here)
+            {
+                root: bII, quality: 'maj7', role: 'N6',
+                label: getChordName(bII, 'maj7') + ' (N)',
+                resolvesTo: null,  // Classical: resolves to V, but not enforced
+            },
+            // Pad 1: German +6 — ♭VI, 1, ♭3, #4 (enharmonic of dom7)
+            // In C: A♭, C, E♭, F# → spelled as A♭7 but functions as Aug6
+            {
+                root: bVI, quality: 'dom7', role: 'Ger+6',
+                label: getChordName(bVI, 'dom7') + ' (Ger⁺⁶)',
+                resolvesTo: V,  // Resolves to V — UI should flash V7 pad
+            },
+            // Pad 2: French +6 — ♭VI, 1, 2, #4
+            // In C: A♭, C, D, F# → unique quality
+            {
+                root: bVI, quality: 'dom7b5', role: 'Fr+6',
+                label: getChordName(bVI, 'dom7b5') + ' (Fr⁺⁶)',
+                resolvesTo: V,  // Resolves to V — UI should flash V7 pad
+            },
+            // Pad 3: Tritone substitution — ♭II dom7 (replaces V7)
+            {
+                root: bII, quality: 'dom7', role: 'TT',
+                label: getChordName(bII, 'dom7') + ' (TT)',
+                resolvesTo: null,  // Color chord, no enforced resolution
+            },
+        ];
+    }
+
+    // ──────────────────────────────────────────────
     // PUBLIC API
     // ──────────────────────────────────────────────
 
@@ -1842,6 +2197,7 @@
         // Core functions
         getColumnRoots,
         getGridChord,
+        getDiatonicChordForRow,
         getGridQuality,
         getDiatonicQuality,
         buildChordPitchClasses,
@@ -1892,6 +2248,15 @@
         isPredominantInMinorKey,
         isRootDiatonic,
         suggestModeForKey,
+
+        // 2nd-row chord generators
+        computeSusChords,
+        computeSecondary7ths,
+        computeAdvancedBorrowed,
+
+        // Resolution guides for secondary dominants
+        getResolutionGuides,
+        getAdvancedResolutionGuides,
     };
 
     console.log('[ChordFieldEngine] Loaded — jazz/gospel/blues harmony engine');

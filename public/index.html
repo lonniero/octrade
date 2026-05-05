@@ -206,6 +206,33 @@
                         <span id="harmony-step-label" class="harmony-step-roman">—</span>
                         <span id="harmony-notes-label" class="harmony-step-notes"></span>
                     </div>
+                    <!-- Harmony MIDI Output Routing -->
+                    <div class="cf-midi-channel-group" style="margin-left: auto;">
+                        <button id="harmony-midi-out-toggle" class="harmony-ctrl-btn cf-toggle"
+                            title="Send harmony notes to MIDI output"
+                            style="width:auto;padding:0 10px;border-radius:12px;font-size:0.7rem;">🔌 MIDI</button>
+                        <div id="harmony-midi-channel-group" style="display:none;">
+                            <select id="harmony-midi-channel" class="cf-midi-channel-select"
+                                title="MIDI output channel">
+                                <option value="0">1</option>
+                                <option value="1" selected>2</option>
+                                <option value="2">3</option>
+                                <option value="3">4</option>
+                                <option value="4">5</option>
+                                <option value="5">6</option>
+                                <option value="6">7</option>
+                                <option value="7">8</option>
+                                <option value="8">9</option>
+                                <option value="9">10</option>
+                                <option value="10">11</option>
+                                <option value="11">12</option>
+                                <option value="12">13</option>
+                                <option value="13">14</option>
+                                <option value="14">15</option>
+                                <option value="15">16</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Chord Field Controls (visible in chordfield mode) -->
@@ -230,24 +257,55 @@
                         <span id="cf-notes-label" class="harmony-step-notes"></span>
                     </div>
 
-                    <!-- Humanization Controls -->
+                    <!-- Humanization Controls (Hidden per request)
                     <div class="cf-humanize-row">
                         <button id="cf-velocity-toggle" class="harmony-ctrl-btn cf-toggle active"
                             title="Toggle velocity humanization">🎯 Humanize</button>
                         <button id="cf-roll-cycle" class="harmony-ctrl-btn cf-toggle"
                             title="Cycle: Off → Roll → Strum">✋ Off</button>
                     </div>
+                    -->
                     <div class="cf-humanize-row">
+                        <!--
                         <button id="cf-rhythm-cycle" class="harmony-ctrl-btn cf-toggle" title="Cycle rhythm pattern">🥁
                             Sustain</button>
                         <button id="cf-arp-cycle" class="harmony-ctrl-btn cf-toggle" title="Cycle arp mode">🎹 Arp
                             Off</button>
                         <button id="cf-arp-rate" class="harmony-ctrl-btn cf-toggle" title="Cycle arp rate"
                             style="display:none">♪ 8th</button>
+                        -->
                         <button id="cf-ring-toggle" class="harmony-ctrl-btn cf-toggle active"
-                            title="Toggle Ring / Grid layout">🔵 Ring</button>
+                            title="Toggle Ring / Grid layout">🎹 Diatonic</button>
                         <button id="cf-automod-toggle" class="harmony-ctrl-btn cf-toggle active"
                             title="Toggle automatic key modulation">🔀 Auto-Mod</button>
+                        <button id="cf-synth-toggle" class="harmony-ctrl-btn cf-toggle active"
+                            title="Toggle Synth Sound (Rhodes / Sine)">🎹 Rhodes</button>
+                    </div>
+                    <!-- MIDI Output Routing -->
+                    <div class="cf-humanize-row cf-midi-out-row">
+                        <button id="cf-midi-out-toggle" class="harmony-ctrl-btn cf-toggle"
+                            title="Send chord field notes to MIDI output (for Ableton, etc.)">🔌 MIDI Out</button>
+                        <div class="cf-midi-channel-group" style="display:none" id="cf-midi-channel-group">
+                            <label>Ch</label>
+                            <select id="cf-midi-channel" class="cf-midi-channel-select" title="MIDI output channel">
+                                <option value="0">1</option>
+                                <option value="1">2</option>
+                                <option value="2">3</option>
+                                <option value="3">4</option>
+                                <option value="4">5</option>
+                                <option value="5">6</option>
+                                <option value="6">7</option>
+                                <option value="7">8</option>
+                                <option value="8">9</option>
+                                <option value="9">10</option>
+                                <option value="10">11</option>
+                                <option value="11">12</option>
+                                <option value="12">13</option>
+                                <option value="13">14</option>
+                                <option value="14">15</option>
+                                <option value="15">16</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
@@ -466,6 +524,7 @@
     <script src="harmony-engine.js" defer></script>
     <script src="chord-field-engine.js" defer></script>
     <script src="rhodes-synth.js" defer></script>
+    <script src="sine-synth.js" defer></script>
     <script src="app.js" defer></script>
 </body>
 
