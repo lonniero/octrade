@@ -5627,13 +5627,7 @@ function getRingChordFieldLPColor(row, col) {
         const root = ChordFieldEngine.CIRCLE_OF_FIFTHS[index % 12];
         if (root === cf.ringActiveRoot) return getKeyLPColorActive(cf.key);
 
-        // Resolution guides take precedence
-        if (cf.resolutionGuides && root !== cf.ringActiveRoot) {
-            const rg = cf.resolutionGuides;
-            if (root === rg.primary) return 5; // Bright Red
-            if (root === rg.deceptive) return 9; // Amber/Orange
-            if (rg.other !== null && root === rg.other) return 13; // Yellow
-        }
+        // Physical Launchpad maintains standard diatonic color (pulsing is handled via Web UI CSS)
 
         const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
         const isDiatonic = ChordFieldEngine.getDiatonicDegree(root, cf.key, modeName) >= 0;
@@ -5677,13 +5671,7 @@ function getDiatonicChordFieldLPColor(row, col) {
         const info = cfGetDiatonicChordInfo(cf, col);
         if (info.root === cf.ringActiveRoot) return getKeyLPColorActive(cf.key);
 
-        // Resolution guides take precedence
-        if (cf.resolutionGuides && info.root !== cf.ringActiveRoot) {
-            const rg = cf.resolutionGuides;
-            if (info.root === rg.primary) return 5; // Bright Red
-            if (info.root === rg.deceptive) return 9; // Amber/Orange
-            if (rg.other !== null && info.root === rg.other) return 13; // Yellow
-        }
+        // Physical Launchpad maintains standard diatonic color (pulsing is handled via Web UI CSS)
 
         return getKeyLPColor(cf.key);
     } else if (zone === 'resolve') {
