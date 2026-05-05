@@ -5216,8 +5216,6 @@ function renderDiatonicPad(pad, row, col) {
             }
         }
 
-        }
-
     } else if (zone === 'resolve' || zone === 'color' || zone === 'tension' || zone === 'portal') {
         let ctxIndex;
         if (zone === 'resolve') ctxIndex = index;
