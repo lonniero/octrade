@@ -239,8 +239,6 @@ const chordFieldState = {
     chordHistory: [],         // last N chords played [{root, quality, timestamp}]
     modulationLog: [],        // recent key changes [{fromKey, toKey, confidence, timestamp}]
     originalKey: 0,           // key the user originally chose (for display: "C → G")
-    justModulated: false,     // true for a few seconds after modulation (post-mod guidance)
-    justModulatedTimer: null, // timer ID for clearing justModulated
     // MIDI Output Mirroring
     midiOutEnabled: false,    // mirror Rhodes notes to MIDI output
     midiOutChannel: 0,        // MIDI channel for chord field output (0-15, default ch 1)
@@ -4446,16 +4444,6 @@ function cfCheckAutoModulation(cf, root, quality, forceResult = null) {
     // Update key
     cf.key = toKey;
 
-    // ── Post-modulation guidance ──
-    // Set justModulated flag — this tells renderers to highlight
-    // the new tonic ★ and dominant V as resolve targets for ~5 seconds
-    cf.justModulated = true;
-    if (cf.justModulatedTimer) clearTimeout(cf.justModulatedTimer);
-    cf.justModulatedTimer = setTimeout(() => {
-        cf.justModulated = false;
-        renderGrid();  // re-render to clear the glow
-    }, 5000);
-
     // Log the modulation
     cf.modulationLog.push({
         fromKey,
@@ -4680,35 +4668,7 @@ function renderRingPad(pad, row, col) {
             pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
         }
 
-        // ── Post-modulation resolve guidance ──
-        // After a key change, clearly highlight WHERE to resolve:
-        //   ★ Tonic (I) = primary target — bright pulsing "resolve here"
-        //   ▸ Dominant (V) = secondary — softer glow as alternative path
-        const isTonic = root === cf.key;
-        const modeName2 = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
-        const scale = ChordFieldEngine.MODES[modeName2] || ChordFieldEngine.MODES.ionian;
-        const isDominant = root === (cf.key + scale[4]) % 12; // V of new key
-
         pad.classList.remove('cf-mod-target', 'cf-resolve-target', 'cf-aug6-flash');
-
-        if (cf.justModulated && !isActiveRoot) {
-            if (isTonic) {
-                // ★ Primary resolve target — unmistakable
-                pad.textContent = pad.textContent + ' ★';
-                pad.classList.add('cf-resolve-target');
-                pad.style.background = 'rgba(255, 255, 255, 0.25)';
-                pad.style.borderColor = 'rgba(255, 255, 255, 0.9)';
-                pad.style.boxShadow = '0 0 18px rgba(255, 255, 255, 0.6), 0 0 36px rgba(255, 255, 255, 0.2)';
-                pad.style.opacity = '1';
-            } else if (isDominant) {
-                // ▸ Secondary target — the V chord in the new key
-                const newKeyH = getKeyHue(cf.key);
-                pad.classList.add('cf-mod-target');
-                pad.style.borderColor = `hsla(${newKeyH}, 80%, 70%, 0.7)`;
-                pad.style.boxShadow = `0 0 10px hsla(${newKeyH}, 70%, 60%, 0.4)`;
-                pad.style.opacity = '1';
-            }
-        }
 
     } else if (zone === 'outer') {
         // Context chords — colored by QUADRANT (resolve/color/tension/portal)
@@ -5223,12 +5183,6 @@ function renderDiatonicPad(pad, row, col) {
             pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
         }
 
-        // ── Post-modulation resolve guidance ──
-        const isTonic = info.root === cf.key;
-        const modeName3 = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
-        const scaleD = ChordFieldEngine.MODES[modeName3] || ChordFieldEngine.MODES.ionian;
-        const isDominant = info.root === (cf.key + scaleD[4]) % 12;
-
         pad.classList.remove('cf-mod-target', 'cf-resolve-target', 'cf-aug6-flash',
                             'cf-res-primary', 'cf-res-deceptive', 'cf-res-other');
 
@@ -5262,21 +5216,6 @@ function renderDiatonicPad(pad, row, col) {
             }
         }
 
-        if (cf.justModulated && !isActiveRoot && !hasGuide) {
-            if (isTonic) {
-                pad.textContent = pad.textContent + ' ★';
-                pad.classList.add('cf-resolve-target');
-                pad.style.background = 'rgba(255, 255, 255, 0.25)';
-                pad.style.borderColor = 'rgba(255, 255, 255, 0.9)';
-                pad.style.boxShadow = '0 0 18px rgba(255, 255, 255, 0.6), 0 0 36px rgba(255, 255, 255, 0.2)';
-                pad.style.opacity = '1';
-            } else if (isDominant) {
-                const newKeyH = getKeyHue(cf.key);
-                pad.classList.add('cf-mod-target');
-                pad.style.borderColor = `hsla(${newKeyH}, 80%, 70%, 0.7)`;
-                pad.style.boxShadow = `0 0 10px hsla(${newKeyH}, 70%, 60%, 0.4)`;
-                pad.style.opacity = '1';
-            }
         }
 
     } else if (zone === 'resolve' || zone === 'color' || zone === 'tension' || zone === 'portal') {
@@ -5696,14 +5635,6 @@ function getRingChordFieldLPColor(row, col) {
             if (rg.other !== null && root === rg.other) return 13; // Yellow
         }
 
-        // Post-modulation: tonic = bright white, V = bright key color
-        if (cf.justModulated && !cf.resolutionGuides) {
-            if (root === cf.key) return LP_COLOR.WHITE;  // tonic = resolve here
-            const modeN = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
-            const sc = ChordFieldEngine.MODES[modeN] || ChordFieldEngine.MODES.ionian;
-            if (root === (cf.key + sc[4]) % 12) return getKeyLPColorActive(cf.key);  // V
-        }
-
         const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
         const isDiatonic = ChordFieldEngine.getDiatonicDegree(root, cf.key, modeName) >= 0;
         return isDiatonic ? getKeyLPColor(cf.key) : getKeyLPColorDim(cf.key);
@@ -5752,14 +5683,6 @@ function getDiatonicChordFieldLPColor(row, col) {
             if (info.root === rg.primary) return 5; // Bright Red
             if (info.root === rg.deceptive) return 9; // Amber/Orange
             if (rg.other !== null && info.root === rg.other) return 13; // Yellow
-        }
-
-        // Post-modulation: tonic = bright white, V = bright key color
-        if (cf.justModulated && !cf.resolutionGuides) {
-            if (info.root === cf.key) return LP_COLOR.WHITE;  // tonic
-            const modeN = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
-            const sc = ChordFieldEngine.MODES[modeN] || ChordFieldEngine.MODES.ionian;
-            if (info.root === (cf.key + sc[4]) % 12) return getKeyLPColorActive(cf.key);  // V
         }
 
         return getKeyLPColor(cf.key);
