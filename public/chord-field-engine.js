@@ -405,20 +405,18 @@
 
         // ── Centroid gravity correction ──
         // Prevents voice leading drift when circling through keys.
-        // If the chord's average pitch drifts outside the sweet zone,
-        // shift the ENTIRE voicing by octave(s) to pull it back.
-        const GRAVITY_LOW = 48;  // C3 — below this, push up
-        const GRAVITY_HIGH = 66;  // F#4 — above this, push down
-        const GRAVITY_TARGET = 57; // A3 — keyboard sweet spot
-
-        if (notes.length > 0) {
+        // ONLY applied to 'close' and 'triad' — spread voicings (open, drop2, drop3,
+        // rootless, quartal) intentionally live higher and must NOT be pulled down.
+        const GRAVITY_TYPES = new Set(['close', 'triad']);
+        if (GRAVITY_TYPES.has(voicingType) && notes.length > 0) {
+            const GRAVITY_LOW = 48;   // C3 — below this, push up
+            const GRAVITY_HIGH = 66;  // F#4 — above this, push down
+            const GRAVITY_TARGET = 57; // A3 — keyboard sweet spot
             const centroid = notes.reduce((a, b) => a + b, 0) / notes.length;
 
             if (centroid < GRAVITY_LOW || centroid > GRAVITY_HIGH) {
-                // Calculate how many octaves to shift to get closest to target
                 const drift = GRAVITY_TARGET - centroid;
                 const octaveShift = Math.round(drift / 12) * 12;
-
                 if (octaveShift !== 0) {
                     notes = notes.map(n => n + octaveShift);
                 }
@@ -692,16 +690,17 @@
         const prevBass = prevVoicing.length > 0 ? Math.min(...prevVoicing) : 0;
         const bass = voiceLeadBass(root, prevBass);
 
-        // Upper voices (just 2 for a triad)
+        // Exactly 2 upper PCs for a 3-note triad (root+3rd+5th)
         const upperPCs = [];
-        for (let i = 1; i < intervals.length; i++) {
+        for (let i = 1; i < intervals.length && i <= 2; i++) {
             upperPCs.push((root + intervals[i]) % 12);
         }
 
         if (prevVoicing.length > 1) {
-            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1);
+            // Trim prevUpper to exactly 2 voices so voiceLeadNatural stays 3-note
+            const prevUpper = [...prevVoicing].sort((a, b) => a - b).slice(1, 3);
             const ledUpper = voiceLeadNatural(upperPCs, prevUpper, prevRoot || 0);
-            return [bass, ...ledUpper].sort((a, b) => a - b);
+            return [bass, ...ledUpper.slice(0, 2)].sort((a, b) => a - b);
         }
 
         // No previous — build from scratch
@@ -927,6 +926,51 @@
         }
 
         return bestNote;
+    }
+
+    /**
+     * Chromatic approaching bass — play a half-step lower neighbor, then resolve to target root.
+     * Returns { approachNote, targetNote } for the caller to schedule with a delay.
+     *
+     * @param {number} newRoot - Target root pitch class (0-11)
+     * @param {number} prevBass - Previous bass MIDI note (or 0 if none)
+     * @returns {{ approachNote: number, targetNote: number }}
+     */
+    function voiceLeadBassApproach(newRoot, prevBass) {
+        const targetNote = voiceLeadBass(newRoot, prevBass);
+        // Chromatic lower neighbor: one semitone below the target
+        const approachNote = targetNote - 1;
+        return { approachNote, targetNote };
+    }
+
+    /**
+     * Slash chord voicing: bass note + major triad in 2nd inversion above.
+     * 2nd inversion = [5th, root, 3rd] i.e. the 5th is the lowest triad tone.
+     *
+     * Example: Cmaj/D → bass=D + upper=[G, C, E]
+     *
+     * @param {number} bassPC  - Bass pitch class (0–11)
+     * @param {number} triadPC - Major triad root pitch class (0–11)
+     * @param {number} prevBass - Previous bass MIDI for voice leading
+     * @returns {number[]} MIDI notes sorted low→high
+     */
+    function voiceSlashChord(bassPC, triadPC, prevBass) {
+        // Bass: independent voice leading
+        const bass = voiceLeadBass(bassPC, prevBass || 0);
+
+        // Triad 2nd inversion: 5th (triadPC+7), root (triadPC), 3rd (triadPC+4)
+        const fifth  = (triadPC + 7) % 12;
+        const root   = triadPC % 12;
+        const third  = (triadPC + 4) % 12;
+
+        // Place triad voices strictly above bass (no artificial gap — avoids octave jumps
+        // when bass PC is close below the first triad PC, e.g. sus4 chords).
+        const aboveBass = bass;
+        const n5th  = findNextAbove(fifth, aboveBass);
+        const nRoot = findNextAbove(root,  n5th);
+        const nThird = findNextAbove(third, nRoot);
+
+        return [bass, n5th, nRoot, nThird].sort((a, b) => a - b);
     }
 
     /**
@@ -1415,6 +1459,13 @@
             };
         }
 
+        // Helper: derive a Roman numeral role string from a root in a given scale
+        function romanRole(root, quality, scaleMode) {
+            const deg = getDiatonicDegree(root % 12, key, scaleMode);
+            if (deg < 0) return getScaleDegreeLabel(root % 12, quality, key, modeName) || '';
+            return getScaleDegreeLabel(root % 12, quality, key, scaleMode) || '';
+        }
+
         // ═══════════════════════════════════════════════
         // QUADRANT 1: RESOLVE (pads 0-3) — "where to land"
         //   Contextual to major/minor key:
@@ -1455,14 +1506,16 @@
             // Pad 0: Strongest functional resolution
             if (currentDegree === 4) {
                 // V → i
-                tryPush(key, min7ths[0], 'resolution');
+                tryPush(key, min7ths[0], romanRole(key, min7ths[0], 'aeolian'));
             } else if (currentDegree === 0) {
                 // i → V (dominant from harmonic minor)
-                tryPush((key + minScale[4]) % 12, min7ths[4], 'resolution');
+                const vR = (key + minScale[4]) % 12;
+                tryPush(vR, min7ths[4], romanRole(vR, min7ths[4], 'aeolian'));
             } else if (currentDegree >= 0) {
                 // Other: circle-of-5ths resolution
                 const targetDeg = (currentDegree + 3) % 7;
-                tryPush((key + minScale[targetDeg]) % 12, min7ths[targetDeg], 'resolution');
+                const tR = (key + minScale[targetDeg]) % 12;
+                tryPush(tR, min7ths[targetDeg], romanRole(tR, min7ths[targetDeg], 'aeolian'));
             } else {
                 // Non-diatonic: stepwise approach to nearest diatonic
                 let resolved = false;
@@ -1470,21 +1523,25 @@
                     const tryRoot = (currentRoot - offset + 12) % 12;
                     const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
                     if (tryDeg >= 0) {
-                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
+                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', romanRole(tryRoot, degree7ths[tryDeg], 'aeolian')));
                         resolved = true;
                         break;
                     }
                 }
-                if (!resolved) resolve.push(makeChord(key, min7ths[0], 'resolve', 'resolution'));
+                if (!resolved) resolve.push(makeChord(key, min7ths[0], 'resolve', romanRole(key, min7ths[0], 'aeolian')));
             }
 
             // Pad 1: ♭VI — major chord, strong common-tone with minor chords
-            tryPush((key + minScale[5]) % 12, min7ths[5], '♭VI') ||
-                tryPush((key + minScale[3]) % 12, min7ths[3], 'iv');
+            const bVIr = (key + minScale[5]) % 12;
+            const ivMr = (key + minScale[3]) % 12;
+            tryPush(bVIr, min7ths[5], romanRole(bVIr, min7ths[5], 'aeolian')) ||
+                tryPush(ivMr, min7ths[3], romanRole(ivMr, min7ths[3], 'aeolian'));
 
             // Pad 2: ♭III — relative major, tonic function
-            tryPush((key + minScale[2]) % 12, min7ths[2], '♭III') ||
-                tryPush((key + minScale[4]) % 12, min7ths[4], 'V');
+            const bIIIr = (key + minScale[2]) % 12;
+            const vMr = (key + minScale[4]) % 12;
+            tryPush(bIIIr, min7ths[2], romanRole(bIIIr, min7ths[2], 'aeolian')) ||
+                tryPush(vMr, min7ths[4], romanRole(vMr, min7ths[4], 'aeolian'));
 
             // Pad 3: Fallback — best remaining common-tone match
             if (resolve.length < 4) {
@@ -1498,10 +1555,11 @@
                     if (score > bestScore) { bestScore = score; bestDeg = d; }
                 }
                 if (bestDeg >= 0) {
-                    tryPush((key + minScale[bestDeg]) % 12, min7ths[bestDeg], 'common-tone');
+                    const fbR = (key + minScale[bestDeg]) % 12;
+                    tryPush(fbR, min7ths[bestDeg], romanRole(fbR, min7ths[bestDeg], 'aeolian'));
                 } else {
                     // Ultimate fallback: tonic
-                    resolve.push(makeChord(key, min7ths[0], 'resolve', 'tonic'));
+                    resolve.push(makeChord(key, min7ths[0], 'resolve', romanRole(key, min7ths[0], 'aeolian')));
                 }
             }
 
@@ -1511,18 +1569,22 @@
             // Pad 0: Strongest functional resolution from current chord
             if (currentDegree === 4) {
                 // On V → resolve to I
-                tryPush(key, degree7ths[0], 'resolution');
+                tryPush(key, degree7ths[0], romanRole(key, degree7ths[0], 'ionian'));
             } else if (currentDegree === 1) {
                 // On ii → go to V
-                tryPush((key + scale[4]) % 12, degree7ths[4], 'resolution');
+                const vR = (key + scale[4]) % 12;
+                tryPush(vR, degree7ths[4], romanRole(vR, degree7ths[4], 'ionian'));
             } else if (currentDegree === 0) {
                 // On I → vi (tonic function partner, bias rule)
-                tryPush((key + scale[5]) % 12, degree7ths[5], 'vi') ||
-                    tryPush((key + scale[1]) % 12, degree7ths[1], 'resolution');
+                const viR = (key + scale[5]) % 12;
+                const iiR = (key + scale[1]) % 12;
+                tryPush(viR, degree7ths[5], romanRole(viR, degree7ths[5], 'ionian')) ||
+                    tryPush(iiR, degree7ths[1], romanRole(iiR, degree7ths[1], 'ionian'));
             } else if (currentDegree >= 0) {
                 // Other diatonic: resolve down a 5th (circle of 5ths motion)
                 const targetDeg = (currentDegree + 3) % 7;
-                tryPush((key + scale[targetDeg]) % 12, degree7ths[targetDeg], 'resolution');
+                const tR = (key + scale[targetDeg]) % 12;
+                tryPush(tR, degree7ths[targetDeg], romanRole(tR, degree7ths[targetDeg], 'ionian'));
             } else {
                 // Non-diatonic: resolve down semitone to nearest diatonic
                 let resolved = false;
@@ -1530,34 +1592,37 @@
                     const tryRoot = (currentRoot - offset + 12) % 12;
                     const tryDeg = getDiatonicDegree(tryRoot, key, modeName);
                     if (tryDeg >= 0) {
-                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', 'resolution'));
+                        resolve.push(makeChord(tryRoot, degree7ths[tryDeg], 'resolve', romanRole(tryRoot, degree7ths[tryDeg], 'ionian')));
                         resolved = true;
                         break;
                     }
                 }
-                if (!resolved) resolve.push(makeChord(key, degree7ths[0], 'resolve', 'resolution'));
+                if (!resolved) resolve.push(makeChord(key, degree7ths[0], 'resolve', romanRole(key, degree7ths[0], 'ionian')));
             }
 
             // Pad 1: iii (mediant — tonic function, common-tone with I and vi)
             const iiiRoot = (key + scale[2]) % 12;
-            tryPush(iiiRoot, degree7ths[2], 'mediant') ||
-                tryPush((key + scale[3]) % 12, degree7ths[3], 'plagal');
+            const ivRootM = (key + scale[3]) % 12;
+            tryPush(iiiRoot, degree7ths[2], romanRole(iiiRoot, degree7ths[2], 'ionian')) ||
+                tryPush(ivRootM, degree7ths[3], romanRole(ivRootM, degree7ths[3], 'ionian'));
 
             // Pad 2: IV preferred (predominant bias rule: IV over ii)
             const ivRoot = (key + scale[3]) % 12;
             if (!resolve.some(c => c.root === ivRoot)) {
-                tryPush(ivRoot, degree7ths[3], 'plagal') ||
-                    tryPush((key + scale[4]) % 12, degree7ths[4], 'dominant');
+                tryPush(ivRoot, degree7ths[3], romanRole(ivRoot, degree7ths[3], 'ionian')) ||
+                    tryPush((key + scale[4]) % 12, degree7ths[4], romanRole((key + scale[4]) % 12, degree7ths[4], 'ionian'));
             } else {
                 // IV already used, offer V instead
-                tryPush((key + scale[4]) % 12, degree7ths[4], 'dominant') ||
-                    tryPush((key + scale[1]) % 12, degree7ths[1], 'supertonic');
+                const vR2 = (key + scale[4]) % 12;
+                const iiR2 = (key + scale[1]) % 12;
+                tryPush(vR2, degree7ths[4], romanRole(vR2, degree7ths[4], 'ionian')) ||
+                    tryPush(iiR2, degree7ths[1], romanRole(iiR2, degree7ths[1], 'ionian'));
             }
 
             // Pad 3: Fallback — best remaining common-tone match or tonic
             if (resolve.length < 4) {
                 if (key !== currentRoot && !resolve.some(c => c.root === key)) {
-                    resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+                    resolve.push(makeChord(key, degree7ths[0], 'resolve', romanRole(key, degree7ths[0], 'ionian')));
                 } else {
                     const usedRoots = new Set(resolve.map(c => c.root));
                     usedRoots.add(currentRoot);
@@ -1572,9 +1637,10 @@
                         }
                     }
                     if (bestDeg >= 0) {
-                        tryPush((key + scale[bestDeg]) % 12, degree7ths[bestDeg], 'common-tone');
+                        const fbR = (key + scale[bestDeg]) % 12;
+                        tryPush(fbR, degree7ths[bestDeg], romanRole(fbR, degree7ths[bestDeg], 'ionian'));
                     } else {
-                        resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+                        resolve.push(makeChord(key, degree7ths[0], 'resolve', romanRole(key, degree7ths[0], 'ionian')));
                     }
                 }
             }
@@ -1582,7 +1648,7 @@
 
         // Safety: ensure exactly 4 resolve chords
         while (resolve.length < 4) {
-            resolve.push(makeChord(key, degree7ths[0], 'resolve', 'tonic'));
+            resolve.push(makeChord(key, degree7ths[0], 'resolve', romanRole(key, degree7ths[0], isMinorResolve ? 'aeolian' : 'ionian')));
         }
 
         // ═══════════════════════════════════════════════
@@ -1601,8 +1667,8 @@
 
         if (showMinorBorrowed) {
             // In major: borrow from parallel minor
-            // Pad 4 → ♭I  (e.g., Cm in C major)
-            color.push(makeChord(key, 'min7', 'color', 'bI'));
+            // Pad 4 → ♭VII7 (Backdoor Dominant, e.g., B♭7 in C major)
+            color.push(makeChord((key + 10) % 12, 'dom7', 'color', 'bVII7'));
             // Pad 5 → ♭III (e.g., E♭maj7 in C major)
             color.push(makeChord((key + 3) % 12, 'maj7', 'color', 'bIII'));
             // Pad 6 → ♭IV  (e.g., Fm7 in C major → aeolian degree 3)
@@ -1623,19 +1689,15 @@
 
         // ═══════════════════════════════════════════════
         // QUADRANT 3: TENSION (pads 8-11) — Secondary dominants (NO key change)
-        //   These create harmonic tension without modulating.
         //   Each pad is V7 of a specific diatonic target.
-        //   Contextual to active key:
-        //     Major: V/ii, V/iii, V/V, V/vi
-        //     Minor: V/III, V/iv, V/v, V/VI
+        //   Major: V/ii, V/iii, V/V, V/vi
+        //   Minor: V/III, V/iv, V/v, V/VI
         // ═══════════════════════════════════════════════
         const tension = [];
         const isMinorContext = options?.borrowFrom === 'major';
-        // borrowFrom='major' means minor row was last played (minor borrows from major)
 
         let secTargets, secLabels, secLabelsPortal;
         if (isMinorContext) {
-            // Minor key context: V/III, V/iv, V/v, V/VI
             const minScale = MODES.harmonic_minor;
             secTargets = [
                 (key + minScale[2]) % 12,  // III (♭3)
@@ -1646,7 +1708,6 @@
             secLabels = ['V/III', 'V/iv', 'V/v', 'V/VI'];
             secLabelsPortal = ['V/III_mod', 'V/iv_mod', 'V/v_mod', 'V/VI_mod'];
         } else {
-            // Major key context (default): V/ii, V/iii, V/V, V/vi
             secTargets = [
                 (key + scale[1]) % 12,  // ii
                 (key + scale[2]) % 12,  // iii
@@ -1664,8 +1725,6 @@
 
         // ═══════════════════════════════════════════════
         // QUADRANT 4: PORTAL (pads 12-15) — Same secondary dominants WITH key change
-        //   These are the same V/x chords as Tension, but pressing
-        //   them WILL trigger auto-modulation to the target key.
         // ═══════════════════════════════════════════════
         const portal = [];
         for (let i = 0; i < 4; i++) {
@@ -1677,7 +1736,6 @@
         // ═══════════════════════════════════════════════
         const context = [...resolve, ...color, ...tension, ...portal];
 
-        // Safety: ensure exactly 16
         while (context.length < 16) {
             context.push(makeChord((currentRoot + context.length) % 12, 'dom7', 'fill', 'fill'));
         }
@@ -2064,26 +2122,71 @@
     // ──────────────────────────────────────────────
 
     /**
-     * Compute sus-chord options for the Green 2nd row (resolve_2nd).
-     * These use a 2nd-inversion triad voicing over a pedal bass.
-     * Static behavior — same in both major and minor contexts.
-     *
-     * @param {number} key - Tonal center (0-11)
-     * @returns {Array<{root, quality, bass, label, role}>} 4 sus chord objects
+     * Build a single sus slash chord descriptor.
      */
-    function computeSusChords(key) {
-        // Sus chords: scale degree in bass, triad in 2nd inversion above
-        // All relative to the key
+    function makeSusSlash(triadPC, bassPC, role) {
+        const triadName = getChordName(triadPC % 12, 'maj');
+        const bassName = NOTE_NAMES_FLAT[bassPC % 12] || NOTE_NAMES[bassPC % 12];
+        return { bass: bassPC % 12, triadRoot: triadPC % 12, quality: 'maj', role, label: `${triadName}/${bassName}` };
+    }
+
+    /**
+     * Compute context-reactive sus slash chords for the Green 2nd row.
+     *
+     * Derives from the LAST PLAYED chord root (activeRoot). The 4 pads give:
+     *   [0] Sus of current root  — triad = root, bass = root+2
+     *   [1] Sus of dominant (V)  — triad = V, bass = V+2   (classic sus resolution)
+     *   [2] Sus of subdominant   — triad = IV, bass = IV+2  (gospel IV sus)
+     *   [3] Sus reset to I       — triad = I, bass = I+2
+     *
+     * @param {number} key        - Tonal center (0-11)
+     * @param {number} activeRoot - Last played chord root (0-11)
+     * @param {string} modeName   - Current mode name
+     * @returns {Array<{bass, triadRoot, quality, label, role}>}
+     */
+    function computeSusChords(key, activeRoot, modeName) {
+        const scale = MODES[modeName] || MODES.ionian;
+
+        const I  = key;
+        const V  = (key + scale[4]) % 12;
+        const vi = (key + scale[5]) % 12;
+
+        // Static classic set: I sus2, I sus4, V sus2, vi sus4
         return [
-            { root: key, quality: 'sus2', bass: (key + 2) % 12, label: getChordName(key, 'sus2'), role: 'sus2',
-              voicingRule: '2nd_inv', triadAbove: { root: (key + 2) % 12, quality: 'maj' } },
-            { root: key, quality: 'sus4', bass: (key + 5) % 12, label: getChordName(key, 'sus4'), role: 'sus4',
-              voicingRule: '2nd_inv', triadAbove: { root: (key + 3) % 12, quality: 'maj' } },
-            { root: (key + 7) % 12, quality: 'sus2', bass: (key + 9) % 12, label: getChordName((key + 7) % 12, 'sus2'), role: 'sus5',
-              voicingRule: '2nd_inv', triadAbove: { root: (key + 9) % 12, quality: 'maj' } },
-            { root: (key + 9) % 12, quality: 'sus4', bass: (key + 2) % 12, label: getChordName((key + 9) % 12, 'sus4'), role: 'sus6',
-              voicingRule: '2nd_inv', triadAbove: { root: (key + 0) % 12, quality: 'maj' } },
+            makeSusSlash(I,  (I  + 2) % 12, 'I sus2'),
+            makeSusSlash(I,  (I  + 5) % 12, 'I sus4'),
+            makeSusSlash(V,  (V  + 2) % 12, 'V sus2'),
+            makeSusSlash(vi, (vi + 5) % 12, 'vi sus4'),
         ];
+    }
+
+
+    /**
+     * Compute flat-side dominant portal chords for Purple Row 2.
+     * These are the dominant 7th chords that approach flat-side key targets
+     * (F, B♭, E♭, A♭) from a perfect 5th above. Pressing them triggers a key change.
+     *
+     * @param {number} key - Tonal center (0–11)
+     * @returns {Array<{root, quality, role, label, targetKey}>} 4 chord objects
+     */
+    function computeFlatSidePortals(key) {
+        // Flat-side targets: IV (+5), ♭VII (+10), ♭III (+3), ♭VI (+8)
+        const targets = [
+            { targetKey: (key + 5)  % 12, label: 'V/IV',   role: 'flat_V_IV'  },
+            { targetKey: (key + 10) % 12, label: 'V/♭VII', role: 'flat_V_bVII' },
+            { targetKey: (key + 3)  % 12, label: 'V/♭III', role: 'flat_V_bIII' },
+            { targetKey: (key + 8)  % 12, label: 'V/♭VI',  role: 'flat_V_bVI'  },
+        ];
+        return targets.map(t => {
+            const domRoot = (t.targetKey + 7) % 12;
+            return {
+                root: domRoot,
+                quality: 'dom7',
+                role: t.role,
+                label: t.label,   // e.g. 'V/IV' — functional display label
+                targetKey: t.targetKey,
+            };
+        });
     }
 
     /**
@@ -2121,7 +2224,6 @@
         }
 
         return targets.map((target, i) => {
-            // Leading tone dim7 = root is a half-step below the target
             const ltRoot = (target + 11) % 12;
             return {
                 root: ltRoot,
@@ -2143,36 +2245,37 @@
      * @returns {Array<{root, quality, label, role, resolvesTo}>} 4 chord objects
      */
     function computeAdvancedBorrowed(key, modeName) {
-        const V = (key + 7) % 12;
+        const V   = (key + 7) % 12;
         const bII = (key + 1) % 12;
         const bVI = (key + 8) % 12;
 
         return [
-            // Pad 0: Neapolitan — ♭II major (first inversion in classical, root pos here)
+            // Pad 0: Neapolitan — ♭IImaj7 (classical pre-dominant, strong colour)
+            // In C: D♭maj7 — approaches V7 or i from a half-step above the tonic
             {
                 root: bII, quality: 'maj7', role: 'N6',
-                label: getChordName(bII, 'maj7') + ' (N)',
-                resolvesTo: null,  // Classical: resolves to V, but not enforced
+                label: getChordName(bII, 'maj7') + ' (N6)',
+                resolvesTo: V,
             },
-            // Pad 1: German +6 — ♭VI, 1, ♭3, #4 (enharmonic of dom7)
-            // In C: A♭, C, E♭, F# → spelled as A♭7 but functions as Aug6
+            // Pad 1: German +6 — ♭VI dom7 (enharmonic of Aug6)
+            // In C: A♭7 → G7 → Cmaj7
             {
                 root: bVI, quality: 'dom7', role: 'Ger+6',
                 label: getChordName(bVI, 'dom7') + ' (Ger⁺⁶)',
-                resolvesTo: V,  // Resolves to V — UI should flash V7 pad
+                resolvesTo: V,
             },
-            // Pad 2: French +6 — ♭VI, 1, 2, #4
-            // In C: A♭, C, D, F# → unique quality
+            // Pad 2: French +6 — ♭VI dom7♭5
             {
                 root: bVI, quality: 'dom7b5', role: 'Fr+6',
                 label: getChordName(bVI, 'dom7b5') + ' (Fr⁺⁶)',
-                resolvesTo: V,  // Resolves to V — UI should flash V7 pad
+                resolvesTo: V,
             },
-            // Pad 3: Tritone substitution — ♭II dom7 (replaces V7)
+            // Pad 3: Tritone Substitution (bII7) — semitone descent resolution to I
+            // In C: Db7 (tritone from G7), smooth half-step voice-leading into Cmaj7
             {
-                root: bII, quality: 'dom7', role: 'TT',
-                label: getChordName(bII, 'dom7') + ' (TT)',
-                resolvesTo: null,  // Color chord, no enforced resolution
+                root: (key + 1) % 12, quality: 'dom7', role: 'TT sub',
+                label: getChordName((key + 1) % 12, 'dom7') + ' (TT)',
+                resolvesTo: key,
             },
         ];
     }
@@ -2205,6 +2308,8 @@
 
         // Voicing
         voiceChord,
+        voiceSlashChord,
+        voiceLeadBassApproach,
 
         // Glow
         computeSharedNotes,
@@ -2252,6 +2357,7 @@
         // 2nd-row chord generators
         computeSusChords,
         computeSecondary7ths,
+        computeFlatSidePortals,
         computeAdvancedBorrowed,
 
         // Resolution guides for secondary dominants

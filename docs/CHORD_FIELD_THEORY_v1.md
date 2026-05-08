@@ -18,14 +18,13 @@
    - [Red Row 3 (Pads 4–7): Secondary Dominants](#red-row-3-pads-47-secondary-dominants)
    - [Red Row 2 (Pads 4–7): Secondary Diminished 7ths](#red-row-2-pads-47-secondary-diminished-7ths)
    - [Purple Row 3 (Pads 0–3): Portal Modulation Gates](#purple-row-3-pads-03-portal-modulation-gates)
-   - [Purple Row 2 (Pads 0–3): Flat-Side Portal Gates](#purple-row-2-pads-03-flat-side-portal-gates)
+   - [Purple Row 2 (Pads 0–3): Diminished Portal Gates](#purple-row-2-pads-03-diminished-portal-gates)
 5. [Rows 0–1: The Memory Bank (Breadcrumbs)](#5-rows-01-the-memory-bank-breadcrumbs)
 6. [The Voice Leading Engine](#6-the-voice-leading-engine)
 7. [The Auto-Modulation System](#7-the-auto-modulation-system)
 8. [Mode System & Brightness Spectrum](#8-mode-system--brightness-spectrum)
 9. [Voicing Architecture](#9-voicing-architecture)
 10. [The Rhodes FM Synth](#10-the-rhodes-fm-synth)
-11. [Melodic Minor Integration](#11-melodic-minor-integration)
 
 ---
 
@@ -49,7 +48,7 @@ The grid is **8 rows × 8 columns** = 64 pads total. Each row serves a specific 
 Row  0  │  ◆ MEMORY BANK (Breadcrumbs slots 1–8)
 Row  1  │  ◆ MEMORY BANK (Breadcrumbs slots 9–16)
 ─────────┼──────────────────────────────────────────────────────────────────
-Row  2  │  [col 0-3] PURPLE 2nd row — Flat-Side Dominant Portal Gates
+Row  2  │  [col 0-3] PURPLE 2nd row — dim7 Portal Gates
          │  [col 4-7] RED 2nd row    — Secondary Diminished 7ths (no modulation)
 ─────────┼──────────────────────────────────────────────────────────────────
 Row  3  │  [col 0-3] PURPLE 1st row — Secondary Dominant Portal Gates (V/x → key change)
@@ -72,8 +71,7 @@ Row  7  │  [col 0-3] GREEN 2nd row  — Suspended Chords
 | Green  | 6, 7   | 0–3   | Resolution & Suspension              | No          |
 | Gold   | 6, 7   | 4–7   | Borrowed / Modal Interchange         | No          |
 | Red    | 3, 2   | 4–7   | Tension (Secondary Dominants & dim7s)| No          |
-| Purple | 3      | 0–3   | Sharp-side Modulation Gates (V/ii, V/iii, V/V, V/vi → key change) | **Yes** |
-| Purple | 2      | 0–3   | Flat-side Modulation Gates (V/IV, V/♭VII, V/♭III, V/♭VI → key change) | **Yes** |
+| Purple | 3, 2   | 0–3   | Modulation Gates (same chords → key change) | **Yes** |
 
 ---
 
@@ -180,7 +178,7 @@ Suspended chords are gospel staples — they set up a resolution that feels inev
 
 | Pad | Chord | Example (in C) | Character |
 | :-- | :---- | :------------- | :-------- |
-| 4   | ♭VII7 (Backdoor Dominant) | B♭7 | Approaches tonic from the subdominant side — the signature R&B/gospel dominant |
+| 4   | ♭I (tonic minor) | Cm7 | Direct "darkening" — flatten the 3rd of your tonic |
 | 5   | ♭III (relative major of parallel minor) | E♭maj7 | Dreamy, distant — three steps flat |
 | 6   | ♭IV (minor subdominant) | Fm7 | Melancholic — the Andalusian cadence sound |
 | 7   | ♭VI (major on ♭6th) | A♭maj7 | Stadium anthem move — surprising but immediately right |
@@ -288,20 +286,18 @@ Like the Red 1st row, pressing these also activates the Resolution Guide highlig
 
 ---
 
-### Purple Row 2 (Pads 0–3): Flat-Side Portal Gates
+### Purple Row 2 (Pads 0–3): Diminished Portal Gates
 
-**Theory:** While Row 3 portals navigate **up the circle of fifths** (sharp-side: D, E, G, A), Row 2 portals navigate **down the circle** (flat-side: F, B♭, E♭, A♭). Each pad plays the dominant 7th of a flat-side target and triggers a permanent key change — identical mechanism to Row 3, but opposite harmonic direction.
+**Theory:** The same relationship as Red/Purple 1st row, but using **leading-tone diminished 7th chords** as the modulation gateway. These are the same chords as Red Row 2, but pressing one **also triggers a key change**.
 
-Flat-side modulations feel qualitatively different from sharp-side: where sharp portals create a sense of *rising into* a brighter key, flat portals feel like *settling into* or *opening toward* a darker one. This is the direction of gospel vamps, neo-soul key drops, and subdominant drift.
+| Pad | Label         | dim7 chord | Modulates to |
+| :-- | :------------ | :--------- | :----------- |
+| 0   | vii°7/ii → I  | C#dim7     | D Major/Minor |
+| 1   | vii°7/iii → I | D#dim7     | E Major/Minor |
+| 2   | vii°7/V → I   | F#dim7     | G Major/Minor |
+| 3   | vii°7/vi → I  | G#dim7     | A Major/Minor |
 
-| Pad | Label       | Chord | Modulates to   | Character |
-| :-- | :---------- | :---- | :------------- | :-------- |
-| 0   | V/IV → I   | C7    | F Major/Minor  | Subdominant — the closest flat-side step; the “relaxing into” move. |
-| 1   | V/♭VII → I | F7    | B♭ Major/Minor | One step flat — gospel/soul staple. |
-| 2   | V/♭III → I | B♭7   | E♭ Major/Minor | Two steps flat — rich and cinematic. |
-| 3   | V/♭VI → I  | E♭7   | A♭ Major/Minor | Three steps flat — deep into the flat world. |
-
-> **Sharp vs. flat portal asymmetry:** A Row 3 portal (e.g. D7 → G) creates the sensation of *arriving*. A Row 2 portal (e.g. F7 → B♭) creates the sensation of *settling*. Row 2 flat portals replace the previous diminished 7th portal row, opening the instrument’s full directional range across the circle.
+The diminished 7th portal is a more dramatic, abrupt modulation than the dominant portal — the chord offers no "return home" ambiguity. Historically, composers used diminished 7ths for sudden, jarring key changes precisely because the chord is so directionally charged.
 
 ---
 
@@ -322,28 +318,6 @@ After recall, the engine updates `cf.prevVoicing` so that the *next* chord you p
 
 ### Why bypass voice leading for recall?
 The voice-leading engine would recalculate the chord's register and inversion based on your current position on the board. A beautiful high-register rootless voicing you captured might come back as a mid-register close position chord. The breadcrumb bank is a **faithful tape recorder**, not a reharmonizer.
-
-### Harmonic Identity Tags
-
-Each breadcrumb slot stores a **lightweight metadata tag** alongside the raw MIDI array:
-
-```json
-{
-  "voicedMIDI": [48, 52, 55, 59],
-  "root": 0,
-  "quality": "maj7",
-  "key": 0,
-  "mode": "ionian"
-}
-```
-
-**What this unlocks:**
-
-- **Display:** Each breadcrumb pad shows the chord name (e.g. *Cmaj7*) and its key context, instead of a blank slot number.
-- **Context-aware recall:** When you tap a breadcrumb, the engine feeds its stored `root` and `quality` back through `computeContextChords()`. The four color quadrants recalculate *from the perspective of the recalled chord* — as if you had just played it on the diatonic row.
-- **Cross-key memory:** If you saved a chord in D major then modulated to G major, the tag tells the engine the harmonic context at the time of capture. Resolution guides reflect the original key.
-
-> Voice leading is still bypassed on recall — exact MIDI pitches replay faithfully. The harmonic identity tag only affects the *context quadrants*, not the sounding notes.
 
 ---
 
@@ -382,20 +356,6 @@ The bass is handled separately by `voiceLeadBass()`:
 - Range: **E2–C4** (MIDI 40–60)
 - Center: **C3 (MIDI 48)** — piano left-hand sweet spot
 - Prefers root position; plays the chord root in the bass
-
-### Approaching Bass Mode
-
-The standard `voiceLeadBass()` finds the smoothest path to the chord root, scoring by 4th/5th motion and step-wise proximity. The **approaching bass** option adds a pre-resolution chromatic neighbor:
-
-Instead of landing directly on the target root, the bass plays the **chromatic lower neighbor** (one semitone below) as an ornament, then resolves up on the downbeat. The approach note fires on pad press; the target root follows ~80ms later at a lighter velocity so it reads as an ornament, not a chord tone.
-
-| Motion | Interval | Feel |
-| :----- | :------- | :--- |
-| C → G (standard) | P5 | Strong, functional |
-| F♯ → G (approaching) | ↑½ step | Jazzy, “walking” bass |
-| D♭ → D (approaching) | ↑½ step | Gospel/blues chromatic nudge |
-
-This is how gospel pianists set up each chord change — the left hand anticipates the arrival from a semitone below. It also subtly implies dominant function: approaching the root of G from F♯ echoes the tritone content of a G7 chord.
 
 ---
 
@@ -465,57 +425,3 @@ A custom **FM Synthesis electric piano** built entirely in the Web Audio API —
 ---
 
 *Document synchronized with `chord-field-engine.js` and `app.js`. Last Updated: May 2026.*
-
----
-
-## 11. Melodic Minor Integration
-
-**Melodic Minor** (`[0, 2, 3, 5, 7, 9, 11]`) is the most harmonically dense single scale in jazz. Unlike Harmonic Minor (which is used internally for cadences), Melodic Minor surfaces three distinct chord types as playable options in the instrument.
-
-The scale’s richness comes from its modes. Three are particularly important here:
-
-### Mode 7 — Altered Scale (Super-Locrian)
-
-Built on the 7th degree. In C melodic minor, this is the **B Altered Scale**: B, C, D, E♭, F, G, A.
-
-This scale supplies the `dom7alt` chord type — a dominant 7th with every possible alteration stacked simultaneously:
-
-| Interval | Note (over B) | Role |
-| :------- | :------------ | :--- |
-| 1        | B             | Root |
-| 3        | D♯/E♭        | Major 3rd (dominant core) |
-| ♭5       | F             | Tritone |
-| ♭7       | A             | Minor 7th (dominant core) |
-| ♭9       | C             | Flat 9 — the dark tension |
-| ♯9       | D             | Sharp 9 — the “Hendrix” tension |
-| ♭13      | G             | Flat 13 — the “crushed” 5th |
-
-**In the instrument:** `dom7alt` is currently exposed in Row 7 for chromatic/dim columns. It is the natural chord for the V7 dominant when full jazz tension is required — far more charged than a plain `dom7`.
-
-### Mode 4 — Lydian Dominant
-
-Built on the 4th degree. In C melodic minor, this is the **F Lydian Dominant Scale**: F, G, A, B, C, D, E♭.
-
-This produces the `dom7♯11` chord type — a dominant 7th with a raised 4th, creating the signature sound of jazz and film scoring. The ♯11 is the tritone above the root, which gives the chord an unresolved, hovering quality even at rest.
-
-**In C:** F7♯11 — F, A, E♭, B (tritone on top, suspended over the dominant). This is the “sound of unresolved expectation” that Herbie Hancock and Wayne Shorter built entire albums around.
-
-**In the instrument:** `dom7sharp11` is defined in `CHORD_INTERVALS` and available as a quality. It is the natural pairing for the ♭VII7 Backdoor Dominant in the Gold Row 6 slot, where the ♯11 color reinforces the non-standard approach direction.
-
-### Mode 3 — Lydian Augmented
-
-Built on the 3rd degree. In C melodic minor, this is the **E♭ Lydian Augmented Scale**: E♭, F, G, A, B, C, D.
-
-This produces the `augmaj7` chord type — a major 7th chord with a raised 5th. The augmented 5th creates an unstable, shimmering quality that is neither the clean brightness of `maj7` nor the tension of a dominant.
-
-**In C:** E♭maj7♯5 — E♭, G, B, D. This is the chord that sounds like *something is about to change* even though it’s technically a tonic function chord. Common in film scores for the moment before a reveal.
-
-**In the instrument:** `augmaj7` is defined in `CHORD_INTERVALS` and available as a chord type. It is the natural quality for the ♭III when borrowed into a major context with extra instability.
-
-### Summary Table
-
-| Mode | Scale Name | Chord Type | Symbol | Engine Key | Character |
-| :--- | :--------- | :--------- | :----- | :--------- | :-------- |
-| 7th  | Altered / Super-Locrian | Altered Dominant | `7alt` | `dom7alt` | Maximum jazz tension — every alteration at once |
-| 4th  | Lydian Dominant | Lydian Dominant | `7♯11` | `dom7sharp11` | Hovering, unresolved — the Shorter/Hancock sound |
-| 3rd  | Lydian Augmented | Augmented Major 7th | `maj7♯5` | `augmaj7` | Shimmering tonic — stability with hidden instability |

@@ -191,6 +191,7 @@ const chordFieldState = {
     activeNotes: [],        // currently sounding MIDI notes
     glowGrid: null,         // flat 64-element glow array
     lastChordLabel: '',     // display label
+    lastChordRole: '',      // Roman numeral role of the active chord (e.g. 'IV/V', 'bVII7')
     activeSynth: 'rhodes',  // 'rhodes' | 'sine'
     rhodes: null,           // shared or own RhodesSynth
     sine: null,             // shared or own SineSynth
@@ -236,6 +237,7 @@ const chordFieldState = {
     undoStack: [],            // [{root, quality, prevVoicing, prevRoot, ringContextChords}]
     // Auto-Modulation
     modulationEnabled: true,  // master toggle for auto key shifting
+    approachBassEnabled: false, // chromatic lower-neighbor bass ornament before each chord root
     chordHistory: [],         // last N chords played [{root, quality, timestamp}]
     modulationLog: [],        // recent key changes [{fromKey, toKey, confidence, timestamp}]
     originalKey: 0,           // key the user originally chose (for display: "C → G")
@@ -4137,6 +4139,9 @@ function handleChordFieldPadPress(row, col) {
     } else {
         cf.lastChordLabel = `${rootName}${ChordFieldEngine.getQualitySuffix(quality)}`;
     }
+    // Always update role so degreeLabel renders for classic grid presses
+    const _modName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    cf.lastChordRole = ChordFieldEngine.getScaleDegreeLabel(root, quality, cf.key, _modName) || '';
 
     updateChordFieldUI();
     renderGrid();  // renderGrid calls updateLaunchpadLEDs internally
@@ -4232,7 +4237,11 @@ function cfHandleRingPadPress(row, col) {
         const root = ChordFieldEngine.CIRCLE_OF_FIFTHS[index % 12];
         const modeName = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
         const quality = ChordFieldEngine.getDefaultQuality(root, cf.key, modeName);
-        chordInfo = { root, quality, type: 'diatonic', zone: 'inner' };
+        chordInfo = {
+            root, quality,
+            type: 'diatonic', zone: 'inner',
+            role: ChordFieldEngine.getScaleDegreeLabel(root, quality, cf.key, ChordFieldEngine.MODE_ORDER[cf.modeIndex]) || ''
+        };
 
     } else if (zone === 'outer') {
         // Context chord → play it
@@ -4308,9 +4317,11 @@ function cfHandleRingPadPress(row, col) {
             cf.ringActiveRoot = cf.lastOuterChordInfo.root;
             cf.ringActiveQuality = cf.lastOuterChordInfo.quality;
             cf.lastChordLabel = cf.lastOuterChordInfo.label;
+            cf.lastChordRole = cf.lastOuterChordInfo.role;
         }
     } else {
         cfPlayRingChord(cf, chordInfo.root, chordInfo.quality);
+        cf.lastChordRole = chordInfo.role;
     }
 
     // ── Cascade: recompute context chords ──
@@ -4324,7 +4335,8 @@ function cfHandleRingPadPress(row, col) {
         cf.lastOuterChordInfo = {
             root: chordInfo.root,
             quality: chordInfo.quality,
-            label: cf.lastChordLabel
+            label: cf.lastChordLabel,
+            role: cf.lastChordRole
         };
     }
 
@@ -4377,6 +4389,10 @@ function cfPlayRingChord(cf, root, quality) {
         }, beatMs);
     } else {
         cfPlayChordHumanized(cf, voiced);
+        // Chromatic approach bass ornament (fires independently of the chord voices)
+        if (cf.approachBassEnabled) {
+            cfPlayWithApproachBass(cf, root, voiced);
+        }
         if (cf.rhythmPattern > 0) {
             cfStartRhythm(cf);
         }
@@ -4385,6 +4401,34 @@ function cfPlayRingChord(cf, root, quality) {
 
     cf.prevVoicing = voiced;
     cf.prevRoot = root;  // track root for tendency-tone resolution
+}
+
+/**
+ * Play a chromatic approach note in the bass, then release it and fire the target bass root.
+ * Used when cf.approachBassEnabled is true.
+ *
+ * @param {object} cf - chordFieldState
+ * @param {number} root - Target chord root (pitch class)
+ * @param {number[]} voiced - Full voiced MIDI array (already computed, played immediately)
+ */
+function cfPlayWithApproachBass(cf, root, voiced) {
+    const prevBass = cf.prevVoicing?.[0] || 0;
+    const { approachNote, targetNote } = ChordFieldEngine.voiceLeadBassApproach(root, prevBass);
+
+    // Fire approach note immediately at softer velocity
+    const approachVelocity = 0.45;
+    cf.synth.noteOn(approachNote, approachVelocity);
+    cfMidiNoteOn(approachNote, Math.round(approachVelocity * 127));
+
+    // After 80ms: release approach, land target bass (chord is already sounding)
+    setTimeout(() => {
+        cf.synth.noteOff(approachNote);
+        cfMidiNoteOff(approachNote);
+        // Re-trigger just the bass root at normal velocity to emphasise the arrival
+        cf.synth.noteOn(targetNote, 0.72);
+        cfMidiNoteOn(targetNote, 92);
+        setTimeout(() => { cf.synth.noteOff(targetNote); cfMidiNoteOff(targetNote); }, 800);
+    }, 80);
 }
 
 /**
@@ -4521,6 +4565,9 @@ function cfCascadeRingUpdate(cf, newRoot, newQuality, pinnedIndex = -1) {
     } else {
         cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
     }
+    
+    // Ring mode: compute degree label for degreeLabel display
+    cf.lastChordRole = ChordFieldEngine.getScaleDegreeLabel(newRoot, newQuality, cf.key, modeName) || '';
 
     console.log(`🎵 Ring: ${cf.lastChordLabel} | Key: ${ChordFieldEngine.getKeyName(cf.key)} | Suggestions: ` +
         `safe=${ChordFieldEngine.getChordName(cf.ringSuggestions.safe.root, cf.ringSuggestions.safe.quality)}, ` +
@@ -4886,9 +4933,10 @@ function cfComputeDiatonicContext(cf, root, quality, borrowFrom) {
         root, quality, cf.key, modeName, recentRoots
     );
 
-    // ── 2nd-row chord arrays ──
-    cf.susChords = ChordFieldEngine.computeSusChords(cf.key);
+    // ── 2nd-row chord arrays — sus chords are context-reactive ──
+    cf.susChords = ChordFieldEngine.computeSusChords(cf.key, root, modeName);
     cf.secondary7ths = ChordFieldEngine.computeSecondary7ths(cf.key, modeName, options);
+    cf.flatSidePortals = ChordFieldEngine.computeFlatSidePortals(cf.key);
     cf.advancedBorrowed = ChordFieldEngine.computeAdvancedBorrowed(cf.key, modeName);
 }
 
@@ -4932,9 +4980,9 @@ function cfHandleDiatonicPadPress(row, col) {
 
     // ── 2nd-row zones ──
     } else if (zone === 'resolve_2nd') {
-        // Sus chords (Green 2nd row)
+        // Sus / slash chords (Green 2nd row) — upper-structure slash chord playback
         const sus = cf.susChords?.[index];
-        if (sus) chordInfo = { root: sus.root, quality: sus.quality, zone: 'resolve', role: sus.role };
+        if (sus) chordInfo = { bass: sus.bass, triadRoot: sus.triadRoot, quality: 'maj', zone: 'resolve', role: sus.role, label: sus.label };
     } else if (zone === 'tension_2nd') {
         // Secondary dim7 (Red 2nd row — no modulation)
         const sec = cf.secondary7ths?.[index];
@@ -4950,10 +4998,10 @@ function cfHandleDiatonicPadPress(row, col) {
             );
         }
     } else if (zone === 'portal_2nd') {
-        // Secondary dim7 (Purple 2nd row — triggers modulation)
-        const sec = cf.secondary7ths?.[index];
-        if (sec) {
-            chordInfo = { root: sec.root, quality: sec.quality, zone: 'portal', role: sec.role + '_mod' };
+        // Flat-side dominant portals (Purple 2nd row — triggers flat-side modulation)
+        const fp = cf.flatSidePortals?.[index];
+        if (fp) {
+            chordInfo = { root: fp.root, quality: fp.quality, zone: 'portal', role: fp.role, targetKey: fp.targetKey };
         }
     } else if (zone === 'color_2nd') {
         // Advanced borrowed (Gold 2nd row)
@@ -5016,6 +5064,30 @@ function cfHandleDiatonicPadPress(row, col) {
         cf.resolutionGuides = null;
     }
 
+    // ── Slash chord path (sus row) ──
+    // Sus chords use voiceSlashChord, bypassing cfPlayRingChord
+    if (zone === 'resolve_2nd' && chordInfo.bass !== undefined) {
+        cfUndoPush(cf); // explicit undo push since we skip cfPlayRingChord
+        const prevBass = cf.prevVoicing?.[0] || 0;
+        const voiced = ChordFieldEngine.voiceSlashChord(chordInfo.bass, chordInfo.triadRoot, prevBass);
+        if (!voiced || voiced.length === 0) return;
+        cfStopPlayback(cf);
+        cf.activeNotes = voiced;
+        cfPlayChordHumanized(cf, voiced);
+        if (cf.rhythmPattern > 0) cfStartRhythm(cf);
+        cf.prevVoicing = voiced;
+        cf.prevRoot = chordInfo.bass;
+        cf.ringActiveRoot = chordInfo.bass;
+        cf.ringActiveQuality = 'maj';
+        cf.lastChordLabel = chordInfo.label || '';
+        cf.lastChordRole = chordInfo.role;
+        cf.activePadRow = row;
+        cf.activePadCol = col;
+        updateChordFieldUI();
+        renderGrid();
+        return;
+    }
+
     cfPlayRingChord(cf, chordInfo.root, chordInfo.quality);
 
     // ── Green zone (resolve/resolve_2nd): play chord but do NOT recompute context ──
@@ -5024,6 +5096,7 @@ function cfHandleDiatonicPadPress(row, col) {
         const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
         const displayQuality = ChordFieldEngine.applyQualityModifier(chordInfo.quality, modKey);
         cf.lastChordLabel = ChordFieldEngine.getChordName(chordInfo.root, displayQuality);
+        cf.lastChordRole = chordInfo.role;
         cf.activePadRow = row;
         cf.activePadCol = col;
         updateChordFieldUI();
@@ -5038,7 +5111,7 @@ function cfHandleDiatonicPadPress(row, col) {
     else if (zone === 'portal') pinnedCtxIndex = 12 + index;
 
     // ── Phase 8: Pass zone and role for modulation gate ──
-    cfCascadeDiatonicUpdate(cf, chordInfo.root, chordInfo.quality, pinnedCtxIndex, zone, chordInfo.role);
+    cfCascadeDiatonicUpdate(cf, chordInfo.root, chordInfo.quality, pinnedCtxIndex, zone, chordInfo.role, chordInfo.targetKey);
 
     // ── Update resolution guides for portal chords in the NEW key ──
     if (zone === 'portal' || zone === 'portal_2nd') {
@@ -5057,17 +5130,25 @@ function cfHandleDiatonicPadPress(row, col) {
     renderGrid();
 }
 
-function cfCascadeDiatonicUpdate(cf, newRoot, newQuality, pinnedIndex = -1, zone = '', role = '') {
+function cfCascadeDiatonicUpdate(cf, newRoot, newQuality, pinnedIndex = -1, zone = '', role = '', portalTargetKey = undefined) {
     // ── Phase 8: Portal zone forces modulation — tension stays in current key ──
     let modResult = { modulated: false };
     if (zone === 'tension') {
         modResult = { modulated: false };
     } else if (zone === 'portal' || zone === 'portal_2nd') {
-        // Portal is a dominant (V) or leading tone (vii°). 
-        // V resolves down a P5. vii° resolves up a m2.
+        // Portal is a dominant (V) or leading tone (vii°).
+        // Flat-side portals carry an explicit targetKey; sharp-side: resolve down a P5.
         const cleanRole = role.replace('_mod', '');
+        const isFlatSide = cleanRole.startsWith('flat_');
         const isDim = cleanRole.startsWith('vii°');
-        const targetKey = isDim ? (newRoot + 1) % 12 : (newRoot + 5) % 12;
+        let targetKey;
+        if (isFlatSide && portalTargetKey !== undefined) {
+            targetKey = portalTargetKey;
+        } else if (isDim) {
+            targetKey = (newRoot + 1) % 12;
+        } else {
+            targetKey = (newRoot + 5) % 12;
+        }
         
         // Determine target mode from the role
         let targetMode = 'aeolian';
@@ -5081,10 +5162,13 @@ function cfCascadeDiatonicUpdate(cf, newRoot, newQuality, pinnedIndex = -1, zone
 
     if (cf.ringActiveRoot !== undefined) {
         const prevName = ChordFieldEngine.getChordName(cf.ringActiveRoot, cf.ringActiveQuality);
+        const modeName2 = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
         cf.ringBreadcrumbs.unshift({
             root: cf.ringActiveRoot,
             quality: cf.ringActiveQuality,
             name: prevName,
+            key: cf.key,
+            mode: modeName2,
             voicedMIDI: cf.prevVoicing ? cf.prevVoicing.slice() : null
         });
         if (cf.ringBreadcrumbs.length > 16) cf.ringBreadcrumbs.length = 16;
@@ -5116,11 +5200,15 @@ function cfCascadeDiatonicUpdate(cf, newRoot, newQuality, pinnedIndex = -1, zone
         const fromName = ChordFieldEngine.getKeyName(modResult.fromKey);
         const toName = ChordFieldEngine.getKeyName(modResult.toKey);
         const modeLabel = modResult.targetMode === 'aeolian' ? 'min' : 'Maj';
-        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  🔀 ${fromName}→${toName} ${modeLabel}`;
+        cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  \uD83D\uDD00 ${fromName}\u2192${toName} ${modeLabel}`;
     } else {
         cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
     }
+    // Role: prefer explicit role arg (for 2nd-row zones), else compute from scale degree
+    const _dCascMode = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+    cf.lastChordRole = role || ChordFieldEngine.getScaleDegreeLabel(newRoot, newQuality, cf.key, _dCascMode) || '';
 }
+
 
 function renderDiatonicPad(pad, row, col) {
     const cf = chordFieldState;
@@ -5139,14 +5227,18 @@ function renderDiatonicPad(pad, row, col) {
         const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
         const quality = ChordFieldEngine.applyQualityModifier(info.quality, modKey);
         const chordName = ChordFieldEngine.getChordName(info.root, quality);
-        // Major row gets an up-arrow suffix to indicate higher inversion
-        pad.textContent = isMajorRow ? chordName + '\u2191' : chordName;
+        // Compute roman numeral for this pad
+        // Use the row's own mode (ionian/aeolian) so minor row degrees III and VI label correctly
+        const modeName2 = ChordFieldEngine.MODE_ORDER[cf.modeIndex];
+        const rowMode = info.mode || (isMajorRow ? 'ionian' : 'aeolian');
+        const roleStr = ChordFieldEngine.getScaleDegreeLabel(info.root, info.quality, cf.key, rowMode);
+        // Pad shows chord name only — Roman numeral goes to upper display
+        const arrowSuffix = isMajorRow ? '\u2191' : '';
+        pad.textContent = chordName + arrowSuffix;
         const kc = getKeyColors(cf.key);
         // Match both root AND quality — prevents borrowed chords (e.g. Cmaj7 in Cm)
         // from falsely highlighting the same-root diatonic pad (Cm7)
-        const isActiveRoot = info.root === cf.ringActiveRoot
-            && info.quality === cf.ringActiveQuality;
-        if (isActiveRoot || isActive) {
+        if (isActive) {
             pad.style.background = kc.active;
             pad.style.color = '#1a1a2e';
             pad.style.borderColor = kc.borderActive;
@@ -5178,7 +5270,7 @@ function renderDiatonicPad(pad, row, col) {
             pad.style.opacity = '0.8';
         }
         const bcIdx = cf.ringBreadcrumbs.findIndex(b => b.root === info.root);
-        if (bcIdx >= 0 && !isActiveRoot) {
+        if (bcIdx >= 0 && !isActive) {
             pad.style.borderColor = 'rgba(180, 200, 210, 0.5)';
             pad.style.boxShadow = '0 0 4px rgba(180, 200, 210, 0.2)';
         }
@@ -5226,7 +5318,9 @@ function renderDiatonicPad(pad, row, col) {
         if (ctx) {
             const modKey = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
             const displayQ = ChordFieldEngine.applyQualityModifier(ctx.quality, modKey);
-            pad.textContent = ChordFieldEngine.getChordName(ctx.root, displayQ);
+            const chordLabel = ChordFieldEngine.getChordName(ctx.root, displayQ);
+            // Pad shows chord name only — role label goes to upper display
+            pad.textContent = chordLabel;
             const colorMap = {
                 resolve: CF_RING_COLORS.outer_resolve,
                 color: CF_RING_COLORS.outer_color,
@@ -5282,7 +5376,11 @@ function renderDiatonicPad(pad, row, col) {
     } else if (zone === 'breadcrumb') {
         const bc = cf.ringBreadcrumbs[index];
         if (bc) {
-            pad.textContent = bc.name;
+            // Show chord name + captured key if available
+            const keyTag = (bc.key !== undefined)
+                ? ' • ' + ChordFieldEngine.getKeyName(bc.key)
+                : '';
+            pad.textContent = bc.name + keyTag;
             pad.style.fontSize = '7px';
             pad.style.background = CF_RING_COLORS.breadcrumb;
             pad.style.color = CF_RING_COLORS.breadcrumb_text;
@@ -5303,16 +5401,17 @@ function renderDiatonicPad(pad, row, col) {
         }
 
     } else if (zone === 'resolve_2nd') {
-        // ── Green 2nd row: Sus chords ──
+        // ── Green 2nd row: Upper-structure slash chords ──
         const sus = cf.susChords?.[index];
         if (sus) {
-            pad.textContent = sus.label;
-            pad.style.background = 'rgba(60, 160, 100, 0.55)';  // darker green
+            // Show the Roman numeral label (e.g. 'I sus2') not the slash chord name
+            pad.textContent = sus.role || sus.label;
+            pad.style.background = 'rgba(40, 140, 80, 0.6)'; // richer green
             pad.style.color = '#fff';
-            pad.style.borderColor = 'rgba(80, 200, 120, 0.3)';
-            pad.style.boxShadow = '0 0 4px rgba(80, 200, 120, 0.15)';
+            pad.style.borderColor = 'rgba(80, 200, 120, 0.4)';
+            pad.style.boxShadow = '0 0 5px rgba(60, 180, 100, 0.2)';
             pad.style.opacity = isActive ? '1' : '0.75';
-            pad.style.fontSize = '7px';
+            pad.style.fontSize = '6.5px';
             if (isActive) {
                 pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
                 pad.style.boxShadow = '0 0 16px rgba(255, 220, 100, 0.6)';
@@ -5327,8 +5426,9 @@ function renderDiatonicPad(pad, row, col) {
         // ── Red 2nd row: Secondary dim7 (no modulation) ──
         const sec = cf.secondary7ths?.[index];
         if (sec) {
-            pad.textContent = sec.label;
-            pad.style.background = 'rgba(180, 80, 60, 0.55)';  // darker rose
+            // Pad shows chord name only — role label goes to upper display
+            pad.textContent = sec.label || '';
+            pad.style.background = 'rgba(180, 80, 60, 0.55)';
             pad.style.color = '#fff';
             pad.style.borderColor = 'rgba(220, 100, 80, 0.3)';
             pad.style.boxShadow = '0 0 4px rgba(220, 100, 80, 0.15)';
@@ -5345,14 +5445,15 @@ function renderDiatonicPad(pad, row, col) {
         }
 
     } else if (zone === 'portal_2nd') {
-        // ── Purple 2nd row: Secondary dim7 (modulating) ──
-        const sec = cf.secondary7ths?.[index];
-        if (sec) {
-            pad.textContent = sec.label;
-            pad.style.background = 'rgba(130, 80, 180, 0.55)';  // darker purple
+        // ── Purple 2nd row: Flat-side dominant portals (modulating) ──
+        const fp = cf.flatSidePortals?.[index];
+        if (fp) {
+            // Pad shows chord name only — role label goes to upper display
+            pad.textContent = ChordFieldEngine.getChordName(fp.root, 'dom7');
+            pad.style.background = 'rgba(100, 60, 200, 0.6)';
             pad.style.color = '#fff';
-            pad.style.borderColor = 'rgba(160, 100, 220, 0.3)';
-            pad.style.boxShadow = '0 0 4px rgba(160, 100, 220, 0.15)';
+            pad.style.borderColor = 'rgba(150, 100, 255, 0.4)';
+            pad.style.boxShadow = '0 0 6px rgba(130, 80, 240, 0.25)';
             pad.style.opacity = isActive ? '1' : '0.75';
             pad.style.fontSize = '7px';
             if (isActive) {
@@ -5366,11 +5467,19 @@ function renderDiatonicPad(pad, row, col) {
         }
 
     } else if (zone === 'color_2nd') {
-        // ── Gold 2nd row: Advanced borrowed (Neapolitan, Aug6, TT sub) ──
+        // ── Gold 2nd row: Advanced borrowed (Neapolitan, Aug6, V7alt) ──
         const adv = cf.advancedBorrowed?.[index];
         if (adv) {
-            pad.textContent = adv.label;
-            pad.style.background = 'rgba(180, 150, 40, 0.55)';  // darker gold
+            // Aug 6th chords need their abbreviation on the pad — the chord names alone
+            // (D7, D7b5, etc.) are indistinguishable from ordinary chords without it.
+            const advRole = adv.role || '';
+            const advChord = ChordFieldEngine.getChordName(adv.root, adv.quality);
+            if (advRole && advRole !== advChord) {
+                pad.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;height:100%"><span style="font-size:5px;opacity:0.72;letter-spacing:0.3px">${advRole}</span><span style="font-size:7.5px">${advChord}</span></div>`;
+            } else {
+                pad.textContent = advChord;
+            }
+            pad.style.background = 'rgba(180, 150, 40, 0.55)';
             pad.style.color = '#fff';
             pad.style.borderColor = 'rgba(220, 180, 50, 0.3)';
             pad.style.boxShadow = '0 0 4px rgba(220, 180, 50, 0.15)';
@@ -5379,11 +5488,6 @@ function renderDiatonicPad(pad, row, col) {
             if (isActive) {
                 pad.style.borderColor = 'rgba(255, 220, 100, 0.9)';
                 pad.style.boxShadow = '0 0 16px rgba(255, 220, 100, 0.6)';
-            }
-            // Aug6 → V7 flash cue: highlight if this chord's resolve target matches
-            if (adv.resolvesTo !== null && adv.resolvesTo !== undefined &&
-                cf.aug6FlashTarget === adv.resolvesTo) {
-                // Find the V7 pad and pulse it — handled separately in resolve/tension render
             }
         } else {
             pad.textContent = '';
@@ -5465,15 +5569,23 @@ function updateChordFieldUI() {
         } else if (cf.activePadRow !== null && cf.activePadCol !== null) {
             const padInfo = cfGetPadInfo(cf.activePadRow, cf.activePadCol);
             activeRoot = padInfo.root;
-            // Apply quality modifier to show the actual played quality's degree
             const mk = ChordFieldEngine.RING_QUALITY_MODIFIERS[cf.ringQualityModifier]?.key;
             activeQuality = ChordFieldEngine.applyQualityModifier(padInfo.quality, mk);
         }
         if (activeRoot !== undefined && activeQuality) {
             const degreeStr = ChordFieldEngine.getScaleDegreeLabel(activeRoot, activeQuality, cf.key, modeName);
-            degreeLabel.textContent = degreeStr || '♯/♭';
+            // Functional role (V/ii, bVII7, N6, etc.) always wins over raw scale-degree computation.
+            // degreeStr is only a fallback for the initial state when no pad has been pressed yet.
+            // Strip internal flags before display:
+            //   '_mod' suffix  → portal roles: 'V/ii_mod' → 'V/ii'
+            //   'flat_X_Y' pattern → flat-side portals: 'flat_V_bIII' → 'V/bIII'
+            const displayRole = (cf.lastChordRole || '')
+                .replace(/_mod$/, '')
+                .replace(/^flat_(\w+)_(.+)$/, '$1/$2');
+            degreeLabel.textContent = displayRole || degreeStr || '';
         } else {
-            degreeLabel.textContent = '';
+            // No pad active — show last stored role if any
+            degreeLabel.textContent = cf.lastChordRole || '';
         }
     }
 
@@ -5490,19 +5602,19 @@ function updateChordFieldUI() {
 function handleChordFieldCC(buttonIdx) {
     const cf = chordFieldState;
     switch (buttonIdx) {
-        case 0: // Up — next inversion (move lowest note up an octave)
+    case 0: // Up — next inversion (move lowest note up an octave)
             if (cf.prevVoicing && cf.prevVoicing.length > 1) {
                 const sorted = [...cf.prevVoicing].sort((a, b) => a - b);
                 const lowest = sorted.shift();
                 sorted.push(lowest + 12);
                 cf.prevVoicing = sorted;
-                // Replay with new inversion
-                if (cf.synth && cf.activeNotes.length > 0) {
-                    cf.activeNotes.forEach(n => { cf.synth.noteOff(n); cfMidiNoteOff(n); });
+                // Stop any currently sounding notes, then replay inverted chord
+                if (cf.synth) {
+                    (cf.activeNotes || []).forEach(n => { cf.synth.noteOff(n); cfMidiNoteOff(n); });
                 }
                 cf.activeNotes = sorted.slice();
                 cfPlayChordHumanized(cf, cf.activeNotes);
-                console.log(`[ChordField] Inversion up`);
+                console.log(`[ChordField] Inversion up: ${cf.activeNotes}`);
             }
             break;
         case 1: // Down — prev inversion (move highest note down an octave)
@@ -5511,13 +5623,13 @@ function handleChordFieldCC(buttonIdx) {
                 const highest = sorted.pop();
                 sorted.unshift(highest - 12);
                 cf.prevVoicing = sorted;
-                // Replay with new inversion
-                if (cf.synth && cf.activeNotes.length > 0) {
-                    cf.activeNotes.forEach(n => { cf.synth.noteOff(n); cfMidiNoteOff(n); });
+                // Stop any currently sounding notes, then replay inverted chord
+                if (cf.synth) {
+                    (cf.activeNotes || []).forEach(n => { cf.synth.noteOff(n); cfMidiNoteOff(n); });
                 }
                 cf.activeNotes = sorted.slice();
                 cfPlayChordHumanized(cf, cf.activeNotes);
-                console.log(`[ChordField] Inversion down`);
+                console.log(`[ChordField] Inversion down: ${cf.activeNotes}`);
             }
             break;
         case 2: // Left — key down (semitone)
@@ -6471,8 +6583,14 @@ function setupEventListeners() {
     document.getElementById('midi-input-select').addEventListener('change', (e) => selectMidiInput(e.target.value));
 
     // Top controls
-    document.getElementById('ctrl-up').addEventListener('click', () => cycleSmallGridMode('up'));
-    document.getElementById('ctrl-down').addEventListener('click', () => cycleSmallGridMode('down'));
+    document.getElementById('ctrl-up').addEventListener('click', () => {
+        if (state.mode === 'chordfield') handleChordFieldCC(0);
+        else cycleSmallGridMode('up');
+    });
+    document.getElementById('ctrl-down').addEventListener('click', () => {
+        if (state.mode === 'chordfield') handleChordFieldCC(1);
+        else cycleSmallGridMode('down');
+    });
     document.getElementById('ctrl-left').addEventListener('click', shiftPatternLeft);
     document.getElementById('ctrl-right').addEventListener('click', shiftPatternRight);
     document.getElementById('ctrl-mode').addEventListener('click', toggleMode);
