@@ -5201,6 +5201,10 @@ function cfCascadeDiatonicUpdate(cf, newRoot, newQuality, pinnedIndex = -1, zone
         const toName = ChordFieldEngine.getKeyName(modResult.toKey);
         const modeLabel = modResult.targetMode === 'aeolian' ? 'min' : 'Maj';
         cf.lastChordLabel = `${ChordFieldEngine.getChordName(newRoot, displayQuality)}  \uD83D\uDD00 ${fromName}\u2192${toName} ${modeLabel}`;
+        // ── Post-modulation tonic indicator (3s window) ──
+        cf.lastModulatedAt = performance.now();
+        clearTimeout(cf._modResolveTimer);
+        cf._modResolveTimer = setTimeout(() => { cf.lastModulatedAt = null; renderGrid(); }, 3000);
     } else {
         cf.lastChordLabel = ChordFieldEngine.getChordName(newRoot, displayQuality);
     }
@@ -5278,9 +5282,14 @@ function renderDiatonicPad(pad, row, col) {
         pad.classList.remove('cf-mod-target', 'cf-resolve-target', 'cf-aug6-flash',
                             'cf-res-primary', 'cf-res-deceptive', 'cf-res-other');
 
+        // ── Post-modulation: pulse the tonic of the new key for 3 seconds ──
+        if (cf.lastModulatedAt && info.root === cf.key && !isActive) {
+            pad.classList.add('cf-resolve-target');
+        }
+
         let hasGuide = false;
         // ── Resolution guides: highlight diatonic targets for tension chords ──
-        if (cf.resolutionGuides && !isActiveRoot) {
+        if (cf.resolutionGuides && !isActive) {
             const rg = cf.resolutionGuides;
             if (info.root === rg.primary) {
                 // Primary target — bright pulsing border, ★ badge
